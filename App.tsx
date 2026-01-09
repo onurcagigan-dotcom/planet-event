@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { User, Task, ActivityLog } from './types';
+import { User, Task, ActivityLog, TaskStatus } from './types';
 import { INITIAL_TASKS, DEFAULT_CATEGORIES, STATUS_COLORS } from './constants';
 import { TaskCard } from './components/TaskCard';
 import { ActivitySidebar } from './components/ActivitySidebar';
@@ -8,6 +8,7 @@ import { NicknameModal } from './components/NicknameModal';
 import { Header } from './components/Header';
 import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
+import { TaskFormModal } from './components/TaskFormModal';
 
 const STORAGE_KEY_TASKS = 'etkinlik_takip_tasks';
 const STORAGE_KEY_LOGS = 'etkinlik_takip_logs';
@@ -23,6 +24,11 @@ export default function App() {
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [isInitializing, setIsInitializing] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
+  
+  // Modal states
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
+  const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
   // Load initial data
   useEffect(() => {
@@ -86,7 +92,7 @@ export default function App() {
       action,
       timestamp: Date.now()
     };
-    const updatedLogs = [newLog, ...logs].slice(0, 50); // Keep last 50 logs
+    const updatedLogs = [newLog, ...logs].slice(0, 50);
     setLogs(updatedLogs);
     localStorage.setItem(STORAGE_KEY_LOGS, JSON.stringify(updatedLogs));
   };
@@ -97,45 +103,89 @@ export default function App() {
 
     let actionMsg = "updated";
     if (updates.status && updates.status !== task.status) actionMsg = `changed status to "${updates.status}"`;
-    if (updates.notes !== undefined && updates.notes !== task.notes) actionMsg = "updated notes";
-    if (updates.deadline && updates.deadline !== task.deadline) actionMsg = `set deadline to "${updates.deadline}"`;
+    else if (updates.title && updates.title !== task.title) actionMsg = `renamed to "${updates.title}"`;
+    else if (updates.assignee !== undefined && updates.assignee !== task.assignee) actionMsg = `assigned responsible to "${updates.assignee || 'Unassigned'}"`;
+    else if (updates.notes !== undefined && updates.notes !== task.notes) actionMsg = "updated notes";
+    else if (updates.deadline !== undefined && updates.deadline !== task.deadline) actionMsg = updates.deadline ? `set deadline to "${updates.deadline}"` : "removed deadline";
+    else if (updates.category && updates.category !== task.category) actionMsg = `moved to "${updates.category}"`;
 
-    const newTasks = tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now(), assignee: user?.nickname || t.assignee } : t);
+    const newTasks = tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t);
     saveTasks(newTasks);
     addLog(id, task.title, actionMsg);
   };
 
-  const addTask = (category: string) => {
-    const title = prompt("Enter task title:");
-    if (!title) return;
+  const deleteTask = (id: string) => {
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    if (!confirm(`Are you sure you want to delete "${task.title}"?`)) return;
 
-    const newTask: Task = {
-      id: Math.random().toString(36).substr(2, 9),
-      category,
-      title,
-      status: 'Pending',
-      notes: '',
-      deadline: null,
-      assignee: user?.nickname || null,
-      updatedAt: Date.now()
-    };
-
-    const newTasks = [...tasks, newTask];
+    const newTasks = tasks.filter(t => t.id !== id);
     saveTasks(newTasks);
-    addLog(newTask.id, newTask.title, "added a new task");
+    addLog(id, task.title, "deleted the task");
   };
 
-  const addCategory = () => {
-    const name = prompt("Enter new category name:");
-    if (!name) return;
-    const upperName = name.trim().toUpperCase();
-    if (categories.includes(upperName)) {
-      alert("Category already exists!");
+  const handleFormSubmit = (data: { title: string, category: string, deadline: string | null, notes: string, assignee: string | null }) => {
+    // Check for category creation
+    if (!categories.includes(data.category)) {
+      const newCats = [...categories, data.category];
+      saveCategories(newCats);
+      addLog('system', data.category, "created new category via task");
+    }
+
+    if (editingTask) {
+      updateTask(editingTask.id, data);
+    } else {
+      const newTask: Task = {
+        id: Math.random().toString(36).substr(2, 9),
+        title: data.title,
+        category: data.category,
+        deadline: data.deadline,
+        notes: data.notes,
+        assignee: data.assignee,
+        status: 'Pending',
+        updatedAt: Date.now()
+      };
+      const newTasks = [...tasks, newTask];
+      saveTasks(newTasks);
+      addLog(newTask.id, newTask.title, "added a new task");
+    }
+    setIsModalOpen(false);
+    setEditingTask(undefined);
+    setPreselectedCategory(undefined);
+  };
+
+  const editCategory = (oldName: string) => {
+    const newName = prompt(`Enter new name for category "${oldName}":`, oldName);
+    if (!newName || newName.trim() === oldName) return;
+    
+    const formattedName = newName.trim().toUpperCase();
+    if (categories.includes(formattedName)) {
+      alert("This category name already exists.");
       return;
     }
-    const newCats = [...categories, upperName];
+
+    const newCats = categories.map(c => c === oldName ? formattedName : c);
+    const newTasks = tasks.map(t => t.category === oldName ? { ...t, category: formattedName } : t);
+    
     saveCategories(newCats);
-    addLog('system', upperName, "added a new category");
+    saveTasks(newTasks);
+    addLog('system', oldName, `renamed category to "${formattedName}"`);
+  };
+
+  const deleteCategory = (catName: string) => {
+    const taskCount = tasks.filter(t => t.category === catName).length;
+    if (taskCount > 0) {
+      if (!confirm(`Warning: This category contains ${taskCount} task(s). Deleting the category will also delete all associated tasks. Proceed?`)) return;
+    } else {
+      if (!confirm(`Are you sure you want to delete category "${catName}"?`)) return;
+    }
+
+    const newCats = categories.filter(c => c !== catName);
+    const newTasks = tasks.filter(t => t.category !== catName);
+    
+    saveCategories(newCats);
+    saveTasks(newTasks);
+    addLog('system', catName, "deleted the category");
   };
 
   const handleLogin = (nickname: string) => {
@@ -144,10 +194,7 @@ export default function App() {
   };
 
   if (isInitializing) return null;
-
-  if (!user) {
-    return <NicknameModal onJoin={handleLogin} />;
-  }
+  if (!user) return <NicknameModal onJoin={handleLogin} />;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50/50">
@@ -176,11 +223,11 @@ export default function App() {
             </div>
             
             <button 
-              onClick={addCategory}
-              className="w-full sm:w-auto px-4 py-2 bg-slate-800 text-white rounded-lg text-sm font-semibold hover:bg-slate-900 transition-all flex items-center justify-center gap-2"
+              onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
+              className="w-full sm:w-auto px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-100"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
-              New Category
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
+              NEW TASK
             </button>
           </div>
 
@@ -188,15 +235,25 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {categories.map(category => (
                 <div key={category} className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col h-[500px]">
-                  <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2 uppercase tracking-wide">
-                      <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
-                      {category}
-                    </h3>
+                  <div className="flex justify-between items-center mb-4 group/cat">
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <span className="w-2 h-2 shrink-0 rounded-full bg-indigo-500"></span>
+                      <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wide truncate" title={category}>
+                        {category}
+                      </h3>
+                      <div className="hidden group-hover/cat:flex items-center gap-1 ml-2 transition-all">
+                        <button onClick={() => editCategory(category)} className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-indigo-600">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                        </button>
+                        <button onClick={() => deleteCategory(category)} className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-red-600">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                      </div>
+                    </div>
                     <button 
-                      onClick={() => addTask(category)}
+                      onClick={() => { setPreselectedCategory(category); setEditingTask(undefined); setIsModalOpen(true); }}
                       className="p-1.5 hover:bg-slate-100 rounded-lg text-indigo-600 transition-colors"
-                      title="Add Task"
+                      title="Add Task to Category"
                     >
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
                     </button>
@@ -207,7 +264,7 @@ export default function App() {
                       <div className="text-center py-10 text-slate-400 text-sm flex flex-col items-center gap-2">
                         <span>No tasks here.</span>
                         <button 
-                          onClick={() => addTask(category)}
+                          onClick={() => { setPreselectedCategory(category); setEditingTask(undefined); setIsModalOpen(true); }}
                           className="text-[10px] text-indigo-600 font-bold hover:underline"
                         >
                           + ADD FIRST TASK
@@ -219,15 +276,32 @@ export default function App() {
                           key={task.id} 
                           task={task} 
                           onUpdate={(updates) => updateTask(task.id, updates)} 
+                          onDelete={() => deleteTask(task.id)}
+                          onEdit={() => { setEditingTask(task); setIsModalOpen(true); }}
                         />
                       ))
                     )}
                   </div>
                 </div>
               ))}
+              {categories.length === 0 && (
+                <div className="md:col-span-2 text-center py-20 bg-white rounded-xl border-2 border-dashed border-slate-200">
+                   <p className="text-slate-400 mb-4 font-medium">No categories found. Create a task to start!</p>
+                   <button onClick={() => setIsModalOpen(true)} className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-bold">Create First Task</button>
+                </div>
+              )}
             </div>
           ) : (
-            <TaskListView tasks={tasks} onUpdate={updateTask} categories={categories} onAddTask={addTask} />
+            <TaskListView 
+              tasks={tasks} 
+              onUpdate={updateTask} 
+              onDelete={deleteTask}
+              onEdit={(task) => { setEditingTask(task); setIsModalOpen(true); }}
+              categories={categories} 
+              onAddTask={(cat) => { setPreselectedCategory(cat); setEditingTask(undefined); setIsModalOpen(true); }} 
+              onEditCategory={editCategory}
+              onDeleteCategory={deleteCategory}
+            />
           )}
         </div>
 
@@ -235,6 +309,18 @@ export default function App() {
           <ActivitySidebar logs={logs} />
         </aside>
       </main>
+
+      {isModalOpen && (
+        <TaskFormModal 
+          isOpen={isModalOpen}
+          onClose={() => { setIsModalOpen(false); setEditingTask(undefined); setPreselectedCategory(undefined); }}
+          onSubmit={handleFormSubmit}
+          categories={categories}
+          initialData={editingTask}
+          preselectedCategory={preselectedCategory}
+          currentUserNickname={user.nickname}
+        />
+      )}
 
       <footer className="bg-white border-t border-slate-200 py-4 text-center text-slate-400 text-[10px] uppercase tracking-widest font-semibold">
         PLANET &copy; 2026 - Opening Event Track
