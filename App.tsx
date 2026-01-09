@@ -192,7 +192,7 @@ export default function App() {
       </main>
 
       <footer className="bg-white border-t border-slate-200 py-4 text-center text-slate-400 text-[10px] uppercase tracking-widest font-semibold">
-        PLANET &copy; 2024 - Opening Event Track
+        PLANET &copy; 2026 - Opening Event Track
       </footer>
     </div>
   );
