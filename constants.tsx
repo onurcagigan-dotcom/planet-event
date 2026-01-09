@@ -3,7 +3,7 @@ import { Task } from './types';
 
 export const EVENT_DATE = '2026-02-17';
 
-export const CATEGORIES = [
+export const DEFAULT_CATEGORIES = [
   'PREPARATIONS',
   'LOGISTICS & TRANSPORT',
   'CATERING & FOOD',

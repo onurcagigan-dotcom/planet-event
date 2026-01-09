@@ -1,11 +1,13 @@
 
 import React, { useState } from 'react';
 import { Task, TaskStatus } from '../types';
-import { STATUS_COLORS, CATEGORIES } from '../constants';
+import { STATUS_COLORS } from '../constants';
 
 interface TaskListViewProps {
   tasks: Task[];
   onUpdate: (id: string, updates: Partial<Task>) => void;
+  categories: string[];
+  onAddTask: (category: string) => void;
 }
 
 const CATEGORY_THEMES: Record<string, string> = {
@@ -18,7 +20,7 @@ const CATEGORY_THEMES: Record<string, string> = {
   'APPROVALS': 'bg-slate-100 border-slate-300 text-slate-700',
 };
 
-export const TaskListView: React.FC<TaskListViewProps> = ({ tasks, onUpdate }) => {
+export const TaskListView: React.FC<TaskListViewProps> = ({ tasks, onUpdate, categories, onAddTask }) => {
   const [searchTerm, setSearchTerm] = useState('');
 
   const filteredTasks = tasks.filter(t => 
@@ -28,9 +30,9 @@ export const TaskListView: React.FC<TaskListViewProps> = ({ tasks, onUpdate }) =
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[700px]">
-      <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-        <h3 className="font-bold text-slate-800">Complete Task List</h3>
-        <div className="relative w-64">
+      <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <h3 className="font-bold text-slate-800 whitespace-nowrap">Complete Task List</h3>
+        <div className="relative w-full sm:w-64">
           <input 
             type="text"
             placeholder="Search tasks..."
@@ -43,7 +45,7 @@ export const TaskListView: React.FC<TaskListViewProps> = ({ tasks, onUpdate }) =
       </div>
       
       <div className="flex-grow overflow-auto custom-scrollbar">
-        <table className="w-full text-left border-collapse">
+        <table className="w-full text-left border-collapse min-w-[800px]">
           <thead className="sticky top-0 bg-white z-20 shadow-sm">
             <tr className="text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-50">
               <th className="px-4 py-3 border-b border-slate-100 w-1/4">Task Title</th>
@@ -51,14 +53,13 @@ export const TaskListView: React.FC<TaskListViewProps> = ({ tasks, onUpdate }) =
               <th className="px-4 py-3 border-b border-slate-100">Deadline</th>
               <th className="px-4 py-3 border-b border-slate-100">Notes / Explanation</th>
               <th className="px-4 py-3 border-b border-slate-100">Responsible</th>
+              <th className="px-4 py-3 border-b border-slate-100 w-10"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {CATEGORIES.map(category => {
+            {categories.map(category => {
               const categoryTasks = filteredTasks.filter(t => t.category === category);
-              if (categoryTasks.length === 0) return null;
-
-              const theme = CATEGORY_THEMES[category] || 'bg-slate-50 text-slate-600';
+              const theme = CATEGORY_THEMES[category] || 'bg-slate-100 border-slate-300 text-slate-700';
 
               return (
                 <React.Fragment key={category}>
@@ -66,6 +67,15 @@ export const TaskListView: React.FC<TaskListViewProps> = ({ tasks, onUpdate }) =
                   <tr className={`${theme.split(' ')[0]} border-l-4 ${theme.split(' ')[1]}`}>
                     <td colSpan={5} className={`px-4 py-2 text-[11px] font-black uppercase tracking-widest ${theme.split(' ')[2]}`}>
                       {category}
+                    </td>
+                    <td className={`px-4 py-2 text-right ${theme.split(' ')[2]}`}>
+                      <button 
+                        onClick={() => onAddTask(category)}
+                        className="text-[10px] font-bold hover:opacity-70 transition-opacity"
+                        title="Add Task to Category"
+                      >
+                        + ADD
+                      </button>
                     </td>
                   </tr>
                   
@@ -107,8 +117,17 @@ export const TaskListView: React.FC<TaskListViewProps> = ({ tasks, onUpdate }) =
                       <td className="px-4 py-3 text-[11px] text-slate-400 font-medium whitespace-nowrap">
                         {task.assignee || 'Unassigned'}
                       </td>
+                      <td className="px-4 py-3"></td>
                     </tr>
                   ))}
+                  {categoryTasks.length === 0 && !searchTerm && (
+                    <tr className="bg-slate-50/30">
+                      <td colSpan={6} className="px-4 py-2 text-center text-[10px] text-slate-400 italic">
+                        No tasks in this category. 
+                        <button onClick={() => onAddTask(category)} className="ml-2 text-indigo-600 font-bold hover:underline">Click to add</button>
+                      </td>
+                    </tr>
+                  )}
                 </React.Fragment>
               );
             })}
