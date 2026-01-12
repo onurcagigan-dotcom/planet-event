@@ -10,14 +10,14 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-const STORAGE_KEY_TASKS = 'planet_v6_tasks';
-const STORAGE_KEY_LOGS = 'planet_v6_logs';
-const STORAGE_KEY_USER = 'planet_v6_user';
-const STORAGE_KEY_CATEGORIES = 'planet_v6_categories';
-const STORAGE_KEY_LAST_UPDATE = 'planet_v6_last_sync_ts';
+const STORAGE_KEY_TASKS = 'planet_event_v7_tasks';
+const STORAGE_KEY_LOGS = 'planet_event_v7_logs';
+const STORAGE_KEY_USER = 'planet_event_v7_user';
+const STORAGE_KEY_CATEGORIES = 'planet_event_v7_categories';
+const STORAGE_KEY_LAST_UPDATE = 'planet_event_v7_sync_ts';
 
-// Using a fresh KVDB path for better reliability
-const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_sync_stable_v6';
+// New endpoint for V7 to ensure a clean state
+const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/event_track_v7';
 
 type ViewMode = 'board' | 'list';
 type SyncStatus = 'synced' | 'syncing' | 'error' | 'checking';
@@ -32,48 +32,38 @@ export default function App() {
   const [lastSyncTime, setLastSyncTime] = useState<number>(Date.now());
   const [isInitializing, setIsInitializing] = useState(true);
 
-  // Critical refs for state management outside of the render cycle
+  // Use refs to track "in-flight" operations without causing re-renders
   const lastUpdateRef = useRef<number>(0);
-  const isSyncingRef = useRef<boolean>(false);
-  const stateRef = useRef({ tasks, categories, logs });
-
-  // Update stateRef whenever main state changes to ensure sync always has latest data
-  useEffect(() => {
-    stateRef.current = { tasks, categories, logs };
-  }, [tasks, categories, logs]);
-
+  const syncInProgress = useRef<boolean>(false);
+  
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
   const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
   /**
-   * Core Push Function
-   * Persists current local state to the cloud.
+   * Pushes specific data to the cloud. 
+   * Passing data directly prevents sync issues with React state timing.
    */
-  const pushToCloud = async () => {
-    if (isSyncingRef.current) return;
-    isSyncingRef.current = true;
+  const pushToCloud = async (currentTasks: Task[], currentCategories: string[], currentLogs: ActivityLog[]) => {
+    if (syncInProgress.current) return;
+    syncInProgress.current = true;
     setSyncStatus('syncing');
 
     const timestamp = Date.now();
     const payload = {
-      tasks: stateRef.current.tasks,
-      categories: stateRef.current.categories,
-      logs: stateRef.current.logs,
+      tasks: currentTasks,
+      categories: currentCategories,
+      logs: currentLogs,
       lastUpdate: timestamp
     };
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-
+      // We use a simple PUT request. 
+      // Note: We don't set Content-Type to application/json to avoid some CORS preflight blocks on public KV stores.
       const response = await fetch(SYNC_URL, {
         method: 'PUT',
-        body: JSON.stringify(payload),
-        signal: controller.signal
+        body: JSON.stringify(payload)
       });
-
-      clearTimeout(timeoutId);
 
       if (response.ok) {
         lastUpdateRef.current = timestamp;
@@ -81,44 +71,39 @@ export default function App() {
         setLastSyncTime(Date.now());
         setSyncStatus('synced');
       } else {
-        console.error('Push failed with status:', response.status);
-        setSyncStatus('error');
+        throw new Error(`Server responded with ${response.status}`);
       }
     } catch (error) {
-      console.error('Push Error:', error);
+      console.error('Cloud Sync Error (Push):', error);
       setSyncStatus('error');
     } finally {
-      isSyncingRef.current = false;
+      syncInProgress.current = false;
     }
   };
 
   /**
-   * Core Pull Function
-   * Checks cloud for updates and reconciles if cloud is newer.
+   * Pulls data from the cloud and merges if cloud is newer.
    */
   const pullFromCloud = useCallback(async (isManual = false) => {
-    if (isSyncingRef.current) return;
+    if (syncInProgress.current) return;
     
     setSyncStatus(isManual ? 'syncing' : 'checking');
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-
-      const response = await fetch(SYNC_URL, { signal: controller.signal });
-      clearTimeout(timeoutId);
-
+      // Cache busting with timestamp prevents browser from serving stale cloud data
+      const response = await fetch(`${SYNC_URL}?t=${Date.now()}`);
+      
       if (response.ok) {
         const text = await response.text();
         if (!text || text.trim() === "") {
-          // Empty cloud bucket - if manual, we push our local state to initialize it
-          if (isManual) await pushToCloud();
-          else setSyncStatus('synced');
+          // Cloud is empty, initialize it if this was a manual sync
+          if (isManual) await pushToCloud(tasks, categories, logs);
+          setSyncStatus('synced');
           return;
         }
 
         const cloudData = JSON.parse(text);
         
-        // Only update if cloud has a newer timestamp
+        // Logical reconciliation: Cloud wins only if its timestamp is strictly higher
         if (cloudData.lastUpdate > lastUpdateRef.current) {
           setTasks(cloudData.tasks);
           setCategories(cloudData.categories);
@@ -132,21 +117,23 @@ export default function App() {
           localStorage.setItem(STORAGE_KEY_LAST_UPDATE, cloudData.lastUpdate.toString());
         }
         setSyncStatus('synced');
+      } else if (response.status === 404) {
+        // Not found is fine for first-time use
+        setSyncStatus('synced');
       } else {
         setSyncStatus('error');
       }
     } catch (error) {
-      console.error('Pull Error:', error);
+      console.error('Cloud Sync Error (Pull):', error);
       setSyncStatus('error');
     } finally {
-      // Small delay for UX feedback
       if (!isManual) {
-        setTimeout(() => setSyncStatus(prev => (prev === 'checking' || prev === 'syncing') ? 'synced' : prev), 1000);
+        setTimeout(() => setSyncStatus(prev => (prev === 'checking') ? 'synced' : prev), 1500);
       }
     }
-  }, []);
+  }, [tasks, categories, logs]);
 
-  // Initialization
+  // App Initialization
   useEffect(() => {
     const savedUser = localStorage.getItem(STORAGE_KEY_USER);
     if (savedUser) setUser({ nickname: savedUser });
@@ -167,23 +154,24 @@ export default function App() {
 
     setIsInitializing(false);
     
-    // Check cloud on startup
-    setTimeout(() => pullFromCloud(false), 800);
-  }, [pullFromCloud]);
+    // Initial fetch from cloud after a short delay
+    const initFetch = setTimeout(() => pullFromCloud(false), 1000);
+    return () => clearTimeout(initFetch);
+  }, []);
 
-  // Polling every 10 seconds to keep clients in sync
+  // Polling: Every 10 seconds check for updates from other users
   useEffect(() => {
     if (isInitializing || !user) return;
     const interval = setInterval(() => {
-      if (syncStatus === 'synced') pullFromCloud(false);
+      if (syncStatus !== 'syncing') pullFromCloud(false);
     }, 10000);
     return () => clearInterval(interval);
   }, [isInitializing, user, pullFromCloud, syncStatus]);
 
   /**
-   * Updates local state and immediately triggers a cloud push
+   * Helper to update local state and trigger sync
    */
-  const handleDataChange = (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
+  const updateAndSync = (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
     setTasks(newTasks);
     setCategories(newCategories);
     setLogs(newLogs);
@@ -192,12 +180,8 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY_CATEGORIES, JSON.stringify(newCategories));
     localStorage.setItem(STORAGE_KEY_LOGS, JSON.stringify(newLogs));
     
-    // Update local lastUpdate timestamp before pushing
-    lastUpdateRef.current = Date.now();
-    localStorage.setItem(STORAGE_KEY_LAST_UPDATE, lastUpdateRef.current.toString());
-    
-    // Trigger push with a slight delay to allow state to settle
-    setTimeout(() => pushToCloud(), 100);
+    // Push the fresh data directly
+    pushToCloud(newTasks, newCategories, newLogs);
   };
 
   const addLog = (taskId: string, title: string, action: string, currentTasks: Task[], currentCategories: string[], currentLogs: ActivityLog[]) => {
@@ -210,7 +194,7 @@ export default function App() {
       timestamp: Date.now()
     };
     const updatedLogs = [newLog, ...currentLogs].slice(0, 50);
-    handleDataChange(currentTasks, currentCategories, updatedLogs);
+    updateAndSync(currentTasks, currentCategories, updatedLogs);
   };
 
   const updateTask = (id: string, updates: Partial<Task>) => {
@@ -218,8 +202,8 @@ export default function App() {
     if (!task) return;
     
     let actionLabel = "updated";
-    if (updates.status && updates.status !== task.status) actionLabel = `status: ${updates.status}`;
-    else if (updates.assignee !== undefined) actionLabel = `assigned to ${updates.assignee || 'Unassigned'}`;
+    if (updates.status && updates.status !== task.status) actionLabel = `changed status to ${updates.status}`;
+    else if (updates.assignee !== undefined) actionLabel = `reassigned task to ${updates.assignee || 'Unassigned'}`;
     
     const newTasks = tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t);
     addLog(id, task.title, actionLabel, newTasks, categories, logs);
@@ -227,9 +211,9 @@ export default function App() {
 
   const deleteTask = (id: string) => {
     const task = tasks.find(t => t.id === id);
-    if (!task || !confirm(`Delete "${task.title}" permanently?`)) return;
+    if (!task || !confirm(`Are you sure you want to delete "${task.title}"?`)) return;
     const newTasks = tasks.filter(t => t.id !== id);
-    addLog(id, task.title, "removed task", newTasks, categories, logs);
+    addLog(id, task.title, "deleted the task", newTasks, categories, logs);
   };
 
   const handleFormSubmit = (data: { title: string, category: string, deadline: string | null, notes: string, assignee: string | null }) => {
@@ -240,7 +224,7 @@ export default function App() {
 
     if (editingTask) {
       const newTasks = tasks.map(t => t.id === editingTask.id ? { ...t, ...data, updatedAt: Date.now() } : t);
-      addLog(editingTask.id, data.title, "updated details", newTasks, currentCategories, logs);
+      addLog(editingTask.id, data.title, "modified task details", newTasks, currentCategories, logs);
     } else {
       const newTask: Task = {
         id: Math.random().toString(36).substr(2, 9),
@@ -253,7 +237,7 @@ export default function App() {
         updatedAt: Date.now()
       };
       const newTasks = [...tasks, newTask];
-      addLog(newTask.id, newTask.title, "created new task", newTasks, currentCategories, logs);
+      addLog(newTask.id, newTask.title, "created a new task", newTasks, currentCategories, logs);
     }
     setIsModalOpen(false);
     setEditingTask(undefined);
@@ -265,7 +249,7 @@ export default function App() {
     const blob = new Blob(["\uFEFF" + csvRows.join("\n")], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `Planet_Event_Export_${new Date().toISOString().split('T')[0]}.csv`;
+    link.download = `Event_Project_Export_${new Date().toISOString().split('T')[0]}.csv`;
     link.click();
   };
 
@@ -283,8 +267,8 @@ export default function App() {
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
             <div className="flex items-center gap-3">
               <div className="flex gap-1">
-                <button onClick={() => setViewMode('board')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>Board</button>
-                <button onClick={() => setViewMode('list')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'list' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>List</button>
+                <button onClick={() => setViewMode('board')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>Board View</button>
+                <button onClick={() => setViewMode('list')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'list' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>List View</button>
               </div>
               
               <div className="h-6 w-px bg-slate-200 mx-1"></div>
@@ -301,8 +285,8 @@ export default function App() {
                   </span>
                 </button>
                 <div className="flex flex-col">
-                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter leading-none">Last Synced</span>
-                  <span className="text-[10px] text-slate-500 font-mono leading-tight">{new Date(lastSyncTime).toLocaleTimeString([], { hour12: false })}</span>
+                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter leading-none">Status</span>
+                  <span className="text-[10px] text-slate-500 font-mono leading-tight">{syncStatus === 'synced' ? `Last: ${new Date(lastSyncTime).toLocaleTimeString([], { hour12: false })}` : 'Updating...'}</span>
                 </div>
               </div>
             </div>
@@ -314,7 +298,7 @@ export default function App() {
               </button>
               <button onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }} className="flex-1 sm:flex-none px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-100">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                NEW TASK
+                ADD TASK
               </button>
             </div>
           </div>
@@ -335,7 +319,7 @@ export default function App() {
                       <TaskCard key={task.id} task={task} onUpdate={(u) => updateTask(task.id, u)} onDelete={() => deleteTask(task.id)} onEdit={() => { setEditingTask(task); setIsModalOpen(true); }} />
                     ))}
                     {tasks.filter(t => t.category === category).length === 0 && (
-                      <div className="h-full flex items-center justify-center text-slate-300 text-xs italic font-medium">Empty bucket</div>
+                      <div className="h-full flex items-center justify-center text-slate-300 text-xs italic font-medium">No tasks in this category</div>
                     )}
                   </div>
                 </div>
