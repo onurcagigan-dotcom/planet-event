@@ -16,56 +16,75 @@ const STORAGE_KEY_USER = 'etkinlik_takip_user';
 const STORAGE_KEY_CATEGORIES = 'etkinlik_takip_categories';
 const STORAGE_KEY_LAST_UPDATE = 'etkinlik_takip_last_update';
 
-// Paylaşılan proje anahtarı (Gerçek bir uygulamada bu dinamik olabilir)
-const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_event_state';
+// Paylaşılan proje anahtarı - Daha stabil bir bucket kullanıyoruz
+const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_v3_state';
 
 type ViewMode = 'board' | 'list';
-type SyncStatus = 'synced' | 'syncing' | 'error';
+type SyncStatus = 'synced' | 'syncing' | 'error' | 'pulling';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
-  const [lastUpdate, setLastUpdate] = useState<number>(0);
-  const [isInitializing, setIsInitializing] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
+  const [lastSyncTime, setLastSyncTime] = useState<number>(Date.now());
+  const [isInitializing, setIsInitializing] = useState(true);
+
+  // useRef kullanarak stale closure problemlerini engelliyoruz
+  const lastUpdateRef = useRef<number>(0);
   
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
   const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
-  // Bulut verisini çekme
-  const pullFromCloud = useCallback(async () => {
+  // Buluttan veriyi zorunlu çekme veya periyodik kontrol
+  const pullFromCloud = useCallback(async (force = false) => {
+    if (syncStatus === 'syncing' && !force) return;
+    
+    setSyncStatus(force ? 'syncing' : 'pulling');
     try {
       const response = await fetch(SYNC_URL);
       if (response.ok) {
-        const cloudData = await response.json();
-        // Eğer buluttaki veri yerelden daha yeniyse güncelle
-        if (cloudData.lastUpdate > lastUpdate) {
+        const text = await response.text();
+        if (!text) {
+          // Bulut boşsa yereli gönder
+          if (force) await pushToCloud(tasks, categories, logs);
+          setSyncStatus('synced');
+          return;
+        }
+        
+        const cloudData = JSON.parse(text);
+        
+        // Eğer buluttaki veri bizim ref'imizden yeniyse güncelle
+        if (cloudData.lastUpdate > lastUpdateRef.current) {
+          console.log("Cloud is newer, updating local state...");
           setTasks(cloudData.tasks);
           setCategories(cloudData.categories);
           setLogs(cloudData.logs);
-          setLastUpdate(cloudData.lastUpdate);
+          lastUpdateRef.current = cloudData.lastUpdate;
+          setLastSyncTime(Date.now());
           
           localStorage.setItem(STORAGE_KEY_TASKS, JSON.stringify(cloudData.tasks));
           localStorage.setItem(STORAGE_KEY_CATEGORIES, JSON.stringify(cloudData.categories));
           localStorage.setItem(STORAGE_KEY_LOGS, JSON.stringify(cloudData.logs));
           localStorage.setItem(STORAGE_KEY_LAST_UPDATE, cloudData.lastUpdate.toString());
-          setSyncStatus('synced');
         }
+        setSyncStatus('synced');
       }
     } catch (error) {
-      console.error('Sync Error:', error);
+      console.error('Pull Error:', error);
       setSyncStatus('error');
     }
-  }, [lastUpdate]);
+  }, [tasks, categories, logs, syncStatus]);
 
-  // Buluta veri gönderme
+  // Buluta veri basma
   const pushToCloud = async (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
     setSyncStatus('syncing');
     const timestamp = Date.now();
+    lastUpdateRef.current = timestamp; // Önce ref'i güncelleyerek döngü çakışmasını engelle
+    
     const dataToSync = {
       tasks: newTasks,
       categories: newCategories,
@@ -76,10 +95,11 @@ export default function App() {
     try {
       await fetch(SYNC_URL, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(dataToSync)
       });
-      setLastUpdate(timestamp);
       localStorage.setItem(STORAGE_KEY_LAST_UPDATE, timestamp.toString());
+      setLastSyncTime(Date.now());
       setSyncStatus('synced');
     } catch (error) {
       console.error('Push Error:', error);
@@ -87,14 +107,14 @@ export default function App() {
     }
   };
 
-  // İlk yükleme
+  // İlk yükleme ve yerel verileri ayağa kaldırma
   useEffect(() => {
     const savedUser = localStorage.getItem(STORAGE_KEY_USER);
     if (savedUser) setUser({ nickname: savedUser });
 
     const savedTasks = localStorage.getItem(STORAGE_KEY_TASKS);
-    const savedLogs = localStorage.getItem(STORAGE_KEY_LOGS);
     const savedCategories = localStorage.getItem(STORAGE_KEY_CATEGORIES);
+    const savedLogs = localStorage.getItem(STORAGE_KEY_LOGS);
     const savedLastUpdate = localStorage.getItem(STORAGE_KEY_LAST_UPDATE);
 
     if (savedTasks) setTasks(JSON.parse(savedTasks));
@@ -104,22 +124,28 @@ export default function App() {
     else setCategories(DEFAULT_CATEGORIES);
 
     if (savedLogs) setLogs(JSON.parse(savedLogs));
-    if (savedLastUpdate) setLastUpdate(parseInt(savedLastUpdate));
+    if (savedLastUpdate) lastUpdateRef.current = parseInt(savedLastUpdate);
 
     setIsInitializing(false);
     
-    // İlk girişte buluttan en güncel veriyi çek
-    pullFromCloud();
+    // Uygulama açıldığında bir kez çek
+    const initPull = async () => {
+      await pullFromCloud(true);
+    };
+    initPull();
   }, []);
 
-  // Periyodik senkronizasyon (Polling - 5 saniyede bir)
+  // Periyodik kontrol - 5 saniyede bir
   useEffect(() => {
-    if (isInitializing) return;
-    const interval = setInterval(pullFromCloud, 5000);
+    if (isInitializing || !user) return;
+    const interval = setInterval(() => {
+      pullFromCloud();
+    }, 5000);
     return () => clearInterval(interval);
-  }, [pullFromCloud, isInitializing]);
+  }, [isInitializing, user, pullFromCloud]);
 
-  const saveStateAndSync = (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
+  // Eyaleti kaydet ve buluta gönder
+  const saveAndPush = (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
     setTasks(newTasks);
     setCategories(newCategories);
     setLogs(newLogs);
@@ -141,7 +167,7 @@ export default function App() {
       timestamp: Date.now()
     };
     const updatedLogs = [newLog, ...currentLogs].slice(0, 50);
-    saveStateAndSync(currentTasks, currentCategories, updatedLogs);
+    saveAndPush(currentTasks, currentCategories, updatedLogs);
   };
 
   const updateTask = (id: string, updates: Partial<Task>) => {
@@ -194,25 +220,6 @@ export default function App() {
     setPreselectedCategory(undefined);
   };
 
-  const editCategory = (oldName: string) => {
-    const newName = prompt(`Enter new name for category "${oldName}":`, oldName);
-    if (!newName || newName.trim() === oldName) return;
-    
-    const formattedName = newName.trim().toUpperCase();
-    if (categories.includes(formattedName)) return alert("Exists.");
-
-    const newCats = categories.map(c => c === oldName ? formattedName : c);
-    const newTasks = tasks.map(t => t.category === oldName ? { ...t, category: formattedName } : t);
-    addLog('system', oldName, `renamed category to "${formattedName}"`, newTasks, newCats, logs);
-  };
-
-  const deleteCategory = (catName: string) => {
-    if (!confirm(`Delete category "${catName}" and all its tasks?`)) return;
-    const newCats = categories.filter(c => c !== catName);
-    const newTasks = tasks.filter(t => t.category !== catName);
-    addLog('system', catName, "deleted the category", newTasks, newCats, logs);
-  };
-
   const exportToCSV = () => {
     const headers = ["Category", "Task", "Status", "Deadline", "Responsible", "Notes"];
     const csvRows = [headers.join(","), ...tasks.map(t => [`"${t.category}"`,`"${t.title}"`,`"${t.status}"`,`"${t.deadline || ''}"`,`"${t.assignee || ''}"`,`"${(t.notes || '').replace(/\n/g, ' ')}"`].join(","))];
@@ -240,10 +247,23 @@ export default function App() {
                 <button onClick={() => setViewMode('board')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>Board</button>
                 <button onClick={() => setViewMode('list')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'list' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>List</button>
               </div>
+              
               <div className="h-6 w-px bg-slate-200 mx-1"></div>
-              <div className="flex items-center gap-2" title={syncStatus === 'synced' ? 'All changes saved to cloud' : syncStatus === 'syncing' ? 'Syncing...' : 'Connection error'}>
-                <div className={`w-2 h-2 rounded-full ${syncStatus === 'synced' ? 'bg-green-500' : syncStatus === 'syncing' ? 'bg-blue-500 animate-pulse' : 'bg-red-500'}`}></div>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{syncStatus}</span>
+              
+              <div className="flex items-center gap-3">
+                <button 
+                  onClick={() => pullFromCloud(true)}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all ${syncStatus === 'error' ? 'bg-red-50 border-red-200 text-red-600' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}
+                >
+                  <svg className={`w-3.5 h-3.5 ${syncStatus === 'syncing' || syncStatus === 'pulling' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                  <span className="text-[10px] font-black uppercase tracking-widest">
+                    {syncStatus === 'error' ? 'Retry Sync' : syncStatus === 'syncing' ? 'Saving...' : syncStatus === 'pulling' ? 'Checking...' : 'Sync Now'}
+                  </span>
+                </button>
+                <div className="flex flex-col">
+                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">Last Sync</span>
+                  <span className="text-[10px] text-slate-500 font-mono">{new Date(lastSyncTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                </div>
               </div>
             </div>
 
@@ -267,10 +287,6 @@ export default function App() {
                     <div className="flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
                       <h3 className="text-sm font-bold text-slate-800 uppercase truncate">{category}</h3>
-                      <div className="hidden group-hover/cat:flex items-center gap-1 ml-2">
-                        <button onClick={() => editCategory(category)} className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-indigo-600"><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" strokeWidth="2"/></svg></button>
-                        <button onClick={() => deleteCategory(category)} className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-red-600"><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" strokeWidth="2"/></svg></button>
-                      </div>
                     </div>
                     <button onClick={() => { setPreselectedCategory(category); setIsModalOpen(true); }} className="p-1.5 hover:bg-slate-100 rounded-lg text-indigo-600"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4" strokeWidth="2"/></svg></button>
                   </div>
@@ -283,7 +299,16 @@ export default function App() {
               ))}
             </div>
           ) : (
-            <TaskListView tasks={tasks} onUpdate={updateTask} onDelete={deleteTask} onEdit={(t) => { setEditingTask(t); setIsModalOpen(true); }} categories={categories} onAddTask={(c) => { setPreselectedCategory(c); setIsModalOpen(true); }} onEditCategory={editCategory} onDeleteCategory={deleteCategory} />
+            <TaskListView 
+              tasks={tasks} 
+              onUpdate={updateTask} 
+              onDelete={deleteTask} 
+              onEdit={(t) => { setEditingTask(t); setIsModalOpen(true); }} 
+              categories={categories} 
+              onAddTask={(c) => { setPreselectedCategory(c); setIsModalOpen(true); }} 
+              onEditCategory={(c) => {}} 
+              onDeleteCategory={(c) => {}} 
+            />
           )}
         </div>
         <aside className="lg:w-80 shrink-0">
