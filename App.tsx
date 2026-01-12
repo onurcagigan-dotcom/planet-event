@@ -10,12 +10,13 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-const CLOUD_BUCKET_ID = '3a2e1c5f-4e9a-8d6b-0f1e-2d3c4b5a6d7e';
-const PROJECT_NAMESPACE = 'planet_opening_v3';
+// Fresh stable bucket ID
+const CLOUD_BUCKET_ID = '9b2a1c8f-7e6d-4b5a-9c0d-1e2f3a4b5c6d';
+const PROJECT_NAMESPACE = 'planet_opening_v5';
 
 const STORAGE_KEYS = {
-  USER_SESSION: 'planet_auth_v4',
-  LOCAL_BACKUP: 'planet_cache_v4'
+  USER_SESSION: 'planet_auth_v5',
+  LOCAL_BACKUP: 'planet_cache_v5'
 };
 
 export default function App() {
@@ -24,21 +25,20 @@ export default function App() {
   const [categories, setCategories] = useState<string[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [viewMode, setViewMode] = useState<'list' | 'board'>('list');
-  const [syncStatus, setSyncStatus] = useState<'online' | 'syncing' | 'offline' | 'error'>('online');
+  const [syncStatus, setSyncStatus] = useState<'online' | 'syncing' | 'offline' | 'error' | 'success'>('online');
   const [lastSync, setLastSync] = useState<number>(Date.now());
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isReady, setIsReady] = useState(false);
 
-  const isSyncing = useRef(false);
-  const dataVersion = useRef(0);
-  const unsavedChanges = useRef(false);
+  const isSyncingRef = useRef(false);
+  const dataVersionRef = useRef(0);
 
   const getApiUrl = () => `https://kvdb.io/${CLOUD_BUCKET_ID}/${PROJECT_NAMESPACE}`;
 
+  // 1. Initial Load
   useEffect(() => {
     const savedSession = localStorage.getItem(STORAGE_KEYS.USER_SESSION);
-    if (savedSession) {
-      setUser(JSON.parse(savedSession));
-    }
+    if (savedSession) setUser(JSON.parse(savedSession));
 
     const localData = localStorage.getItem(STORAGE_KEYS.LOCAL_BACKUP);
     if (localData) {
@@ -46,25 +46,22 @@ export default function App() {
       setTasks(parsed.tasks || INITIAL_TASKS);
       setCategories(parsed.categories || DEFAULT_CATEGORIES);
       setLogs(parsed.logs || []);
-      dataVersion.current = parsed.version || 0;
+      dataVersionRef.current = parsed.version || 0;
     } else {
       setTasks(INITIAL_TASKS);
       setCategories(DEFAULT_CATEGORIES);
     }
-    
     setIsReady(true);
   }, []);
 
+  // 2. Cloud Save (Manual Trigger)
   const saveToCloud = async (currentData?: Partial<ProjectData>) => {
-    if (isSyncing.current || !navigator.onLine || !user?.isAdmin) {
-       if (!user?.isAdmin) console.warn("Only Admin can save to cloud.");
-       return;
-    }
+    if (isSyncingRef.current || !navigator.onLine || !user?.isAdmin) return;
     
-    isSyncing.current = true;
+    isSyncingRef.current = true;
     setSyncStatus('syncing');
 
-    const nextVersion = dataVersion.current + 1;
+    const nextVersion = dataVersionRef.current + 1;
     const payload: ProjectData = {
       tasks: currentData?.tasks || tasks,
       categories: currentData?.categories || categories,
@@ -81,30 +78,35 @@ export default function App() {
         body: JSON.stringify(payload)
       });
 
-      if (!response.ok) throw new Error('Sync failed');
+      if (!response.ok) throw new Error('Network response was not ok');
 
-      dataVersion.current = nextVersion;
+      dataVersionRef.current = nextVersion;
       setLastSync(Date.now());
-      setSyncStatus('online');
-      unsavedChanges.current = false;
+      setSyncStatus('success');
+      setHasUnsavedChanges(false);
       localStorage.setItem(STORAGE_KEYS.LOCAL_BACKUP, JSON.stringify(payload));
+      
+      // Revert status to online after 3 seconds
+      setTimeout(() => setSyncStatus('online'), 3000);
     } catch (error) {
       console.error('Save Error:', error);
       setSyncStatus('error');
     } finally {
-      isSyncing.current = false;
+      isSyncingRef.current = false;
     }
   };
 
+  // 3. Cloud Load (Background Fetch)
   const loadFromCloud = useCallback(async (isSilent = false) => {
-    if (isSyncing.current || !navigator.onLine || unsavedChanges.current) return;
+    // Don't pull if we are currently syncing or have unsaved local work
+    if (isSyncingRef.current || !navigator.onLine || hasUnsavedChanges) return;
     if (!isSilent) setSyncStatus('syncing');
 
     try {
       const response = await fetch(`${getApiUrl()}?t=${Date.now()}`);
       
       if (response.status === 404) {
-        if (!isSilent && user?.isAdmin) await saveToCloud();
+        setSyncStatus('online'); // Bucket doesn't exist yet, that's okay
         return;
       }
 
@@ -112,11 +114,11 @@ export default function App() {
 
       const cloudData: ProjectData = await response.json();
       
-      if (cloudData.version > dataVersion.current) {
+      if (cloudData.version > dataVersionRef.current) {
         setTasks(cloudData.tasks);
         setCategories(cloudData.categories);
         setLogs(cloudData.logs);
-        dataVersion.current = cloudData.version;
+        dataVersionRef.current = cloudData.version;
         setLastSync(Date.now());
         localStorage.setItem(STORAGE_KEYS.LOCAL_BACKUP, JSON.stringify(cloudData));
       }
@@ -124,14 +126,13 @@ export default function App() {
     } catch (error) {
       if (!isSilent) setSyncStatus('error');
     }
-  }, [user, tasks, categories, logs]);
+  }, [hasUnsavedChanges]);
 
+  // Sync Cycle
   useEffect(() => {
     if (!isReady || !user) return;
     loadFromCloud(true);
-    const syncInterval = setInterval(() => {
-      loadFromCloud(true);
-    }, 20000);
+    const syncInterval = setInterval(() => loadFromCloud(true), 15000);
     return () => clearInterval(syncInterval);
   }, [isReady, user, loadFromCloud]);
 
@@ -140,7 +141,7 @@ export default function App() {
     setTasks(newTasks);
     setCategories(newCats);
     setLogs(newLogs);
-    unsavedChanges.current = true;
+    setHasUnsavedChanges(true);
   };
 
   const handleUpdateTask = (id: string, updates: Partial<Task>) => {
@@ -152,7 +153,7 @@ export default function App() {
       taskId: id,
       taskTitle: task?.title || 'Unknown',
       nickname: user.nickname,
-      action: updates.status ? `changed status to ${updates.status}` : "updated task",
+      action: updates.status ? `set status to ${updates.status}` : "updated task",
       timestamp: Date.now()
     };
     applyChanges(nextTasks, categories, [log, ...logs]);
@@ -168,7 +169,7 @@ export default function App() {
       taskId: id,
       taskTitle: task.title,
       nickname: user.nickname,
-      action: "removed this task",
+      action: "deleted task",
       timestamp: Date.now()
     };
     applyChanges(nextTasks, categories, [log, ...logs]);
@@ -189,7 +190,7 @@ export default function App() {
       taskId: isEditing ? editingTask!.id : 'new',
       taskTitle: data.title,
       nickname: user.nickname,
-      action: isEditing ? "edited task" : "added new task",
+      action: isEditing ? "modified task" : "created task",
       timestamp: Date.now()
     };
     
@@ -220,14 +221,14 @@ export default function App() {
                 <button onClick={() => setViewMode('board')} className={`px-5 py-2 rounded-lg text-[10px] font-black transition-all ${viewMode === 'board' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>BOARD</button>
               </div>
 
-              <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50/50 rounded-xl border border-indigo-100">
-                <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'syncing' ? 'bg-amber-400 animate-pulse' : syncStatus === 'error' ? 'bg-red-500' : 'bg-emerald-500 shadow-sm shadow-emerald-200'}`}></div>
+              <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50/50 rounded-xl border border-indigo-100 min-w-[160px]">
+                <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'syncing' ? 'bg-amber-400 animate-pulse' : syncStatus === 'error' ? 'bg-red-500' : syncStatus === 'success' ? 'bg-emerald-500' : 'bg-emerald-500 shadow-sm shadow-emerald-200'}`}></div>
                 <div className="flex flex-col">
                   <span className="text-[10px] font-black uppercase text-indigo-900 leading-none">
-                    {syncStatus === 'syncing' ? 'Syncing...' : syncStatus === 'error' ? 'Sync Error' : 'Live Connection'}
+                    {syncStatus === 'syncing' ? 'Syncing...' : syncStatus === 'error' ? 'Sync Error' : syncStatus === 'success' ? 'Saved!' : 'Connected'}
                   </span>
                   <span className="text-[9px] text-indigo-500 font-bold mt-1 uppercase">
-                    v.{dataVersion.current} | {new Date(lastSync).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    v.{dataVersionRef.current} | {new Date(lastSync).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </div>
               </div>
@@ -241,17 +242,17 @@ export default function App() {
                 </div>
               ) : (
                 <div className="flex items-center gap-3 w-full md:w-auto">
-                   <button 
+                  <button 
                     onClick={() => saveToCloud()}
                     disabled={syncStatus === 'syncing'}
-                    className={`flex-grow md:flex-none px-6 py-2.5 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 border-2 ${unsavedChanges.current ? 'bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-100' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50'}`}
+                    className={`flex-grow md:flex-none px-6 py-2.5 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 border-2 ${hasUnsavedChanges ? 'bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-200 animate-bounce-subtle' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50'}`}
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"/></svg>
+                    <svg className={`w-4 h-4 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                     {syncStatus === 'syncing' ? 'SAVING...' : 'SAVE TO CLOUD'}
                   </button>
                   <button 
                     onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
-                    className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2 border-2 border-indigo-600"
+                    className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M12 4v16m8-8H4"/></svg>
                     NEW TASK
@@ -306,6 +307,16 @@ export default function App() {
           <ActivitySidebar logs={logs} />
         </aside>
       </main>
+
+      <style>{`
+        @keyframes bounce-subtle {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-2px); }
+        }
+        .animate-bounce-subtle {
+          animation: bounce-subtle 2s infinite ease-in-out;
+        }
+      `}</style>
 
       {isModalOpen && (
         <TaskFormModal 
