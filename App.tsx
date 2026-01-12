@@ -16,8 +16,8 @@ const STORAGE_KEY_USER = 'etkinlik_takip_user';
 const STORAGE_KEY_CATEGORIES = 'etkinlik_takip_categories';
 const STORAGE_KEY_LAST_UPDATE = 'etkinlik_takip_last_update';
 
-// Paylaşılan proje anahtarı - Daha stabil bir bucket kullanıyoruz
-const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_v3_state';
+// Paylaşılan proje anahtarı - Daha kararlı bir uç nokta
+const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_v4_state';
 
 type ViewMode = 'board' | 'list';
 type SyncStatus = 'synced' | 'syncing' | 'error' | 'pulling';
@@ -32,34 +32,42 @@ export default function App() {
   const [lastSyncTime, setLastSyncTime] = useState<number>(Date.now());
   const [isInitializing, setIsInitializing] = useState(true);
 
-  // useRef kullanarak stale closure problemlerini engelliyoruz
   const lastUpdateRef = useRef<number>(0);
+  const syncLockRef = useRef<boolean>(false); // Çakışan istekleri engellemek için
   
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
   const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
-  // Buluttan veriyi zorunlu çekme veya periyodik kontrol
+  // API isteği için yardımcı (timeout destekli)
+  const fetchWithTimeout = async (url: string, options: RequestInit = {}, timeout = 8000) => {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(id);
+      return response;
+    } catch (e) {
+      clearTimeout(id);
+      throw e;
+    }
+  };
+
   const pullFromCloud = useCallback(async (force = false) => {
-    if (syncStatus === 'syncing' && !force) return;
+    if (syncLockRef.current && !force) return;
     
     setSyncStatus(force ? 'syncing' : 'pulling');
     try {
-      const response = await fetch(SYNC_URL);
+      const response = await fetchWithTimeout(SYNC_URL);
       if (response.ok) {
         const text = await response.text();
-        if (!text) {
-          // Bulut boşsa yereli gönder
+        if (!text || text.trim() === "") {
           if (force) await pushToCloud(tasks, categories, logs);
-          setSyncStatus('synced');
           return;
         }
         
         const cloudData = JSON.parse(text);
-        
-        // Eğer buluttaki veri bizim ref'imizden yeniyse güncelle
         if (cloudData.lastUpdate > lastUpdateRef.current) {
-          console.log("Cloud is newer, updating local state...");
           setTasks(cloudData.tasks);
           setCategories(cloudData.categories);
           setLogs(cloudData.logs);
@@ -76,15 +84,17 @@ export default function App() {
     } catch (error) {
       console.error('Pull Error:', error);
       setSyncStatus('error');
+    } finally {
+      if (!force) setTimeout(() => setSyncStatus(prev => prev === 'pulling' ? 'synced' : prev), 1000);
     }
-  }, [tasks, categories, logs, syncStatus]);
+  }, [tasks, categories, logs]);
 
-  // Buluta veri basma
   const pushToCloud = async (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
+    if (syncLockRef.current) return;
+    syncLockRef.current = true;
     setSyncStatus('syncing');
+
     const timestamp = Date.now();
-    lastUpdateRef.current = timestamp; // Önce ref'i güncelleyerek döngü çakışmasını engelle
-    
     const dataToSync = {
       tasks: newTasks,
       categories: newCategories,
@@ -93,21 +103,29 @@ export default function App() {
     };
 
     try {
-      await fetch(SYNC_URL, {
-        method: 'POST',
+      // KVDB için PUT metodu daha stabildir
+      const response = await fetchWithTimeout(SYNC_URL, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(dataToSync)
       });
-      localStorage.setItem(STORAGE_KEY_LAST_UPDATE, timestamp.toString());
-      setLastSyncTime(Date.now());
-      setSyncStatus('synced');
+
+      if (response.ok) {
+        lastUpdateRef.current = timestamp;
+        localStorage.setItem(STORAGE_KEY_LAST_UPDATE, timestamp.toString());
+        setLastSyncTime(Date.now());
+        setSyncStatus('synced');
+      } else {
+        throw new Error('Server response not ok');
+      }
     } catch (error) {
       console.error('Push Error:', error);
       setSyncStatus('error');
+    } finally {
+      syncLockRef.current = false;
     }
   };
 
-  // İlk yükleme ve yerel verileri ayağa kaldırma
   useEffect(() => {
     const savedUser = localStorage.getItem(STORAGE_KEY_USER);
     if (savedUser) setUser({ nickname: savedUser });
@@ -128,23 +146,18 @@ export default function App() {
 
     setIsInitializing(false);
     
-    // Uygulama açıldığında bir kez çek
-    const initPull = async () => {
-      await pullFromCloud(true);
-    };
-    initPull();
+    // Açılışta sessizce çek
+    setTimeout(() => pullFromCloud(false), 500);
   }, []);
 
-  // Periyodik kontrol - 5 saniyede bir
   useEffect(() => {
     if (isInitializing || !user) return;
     const interval = setInterval(() => {
-      pullFromCloud();
-    }, 5000);
+      if (syncStatus !== 'syncing') pullFromCloud();
+    }, 7000); // Polling süresini biraz artırdık (7sn)
     return () => clearInterval(interval);
-  }, [isInitializing, user, pullFromCloud]);
+  }, [isInitializing, user, pullFromCloud, syncStatus]);
 
-  // Eyaleti kaydet ve buluta gönder
   const saveAndPush = (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
     setTasks(newTasks);
     setCategories(newCategories);
@@ -173,34 +186,24 @@ export default function App() {
   const updateTask = (id: string, updates: Partial<Task>) => {
     const task = tasks.find(t => t.id === id);
     if (!task) return;
-
-    let actionMsg = "updated";
-    if (updates.status && updates.status !== task.status) actionMsg = `changed status to "${updates.status}"`;
-    else if (updates.title && updates.title !== task.title) actionMsg = `renamed to "${updates.title}"`;
-    else if (updates.assignee !== undefined && updates.assignee !== task.assignee) actionMsg = `assigned responsible to "${updates.assignee || 'Unassigned'}"`;
-
     const newTasks = tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t);
-    addLog(id, task.title, actionMsg, newTasks, categories, logs);
+    addLog(id, task.title, "güncellendi", newTasks, categories, logs);
   };
 
   const deleteTask = (id: string) => {
     const task = tasks.find(t => t.id === id);
-    if (!task) return;
-    if (!confirm(`Are you sure you want to delete "${task.title}"?`)) return;
-
+    if (!task || !confirm(`"${task.title}" silinecek, emin misiniz?`)) return;
     const newTasks = tasks.filter(t => t.id !== id);
-    addLog(id, task.title, "deleted the task", newTasks, categories, logs);
+    addLog(id, task.title, "silindi", newTasks, categories, logs);
   };
 
   const handleFormSubmit = (data: { title: string, category: string, deadline: string | null, notes: string, assignee: string | null }) => {
     let currentCategories = [...categories];
-    if (!currentCategories.includes(data.category)) {
-      currentCategories = [...currentCategories, data.category];
-    }
+    if (!currentCategories.includes(data.category)) currentCategories = [...currentCategories, data.category];
 
     if (editingTask) {
       const newTasks = tasks.map(t => t.id === editingTask.id ? { ...t, ...data, updatedAt: Date.now() } : t);
-      addLog(editingTask.id, data.title, "updated task details", newTasks, currentCategories, logs);
+      addLog(editingTask.id, data.title, "detayları güncellendi", newTasks, currentCategories, logs);
     } else {
       const newTask: Task = {
         id: Math.random().toString(36).substr(2, 9),
@@ -213,20 +216,19 @@ export default function App() {
         updatedAt: Date.now()
       };
       const newTasks = [...tasks, newTask];
-      addLog(newTask.id, newTask.title, "added a new task", newTasks, currentCategories, logs);
+      addLog(newTask.id, newTask.title, "eklendi", newTasks, currentCategories, logs);
     }
     setIsModalOpen(false);
     setEditingTask(undefined);
-    setPreselectedCategory(undefined);
   };
 
   const exportToCSV = () => {
-    const headers = ["Category", "Task", "Status", "Deadline", "Responsible", "Notes"];
+    const headers = ["Kategori", "Görev", "Durum", "Termin", "Sorumlu", "Notlar"];
     const csvRows = [headers.join(","), ...tasks.map(t => [`"${t.category}"`,`"${t.title}"`,`"${t.status}"`,`"${t.deadline || ''}"`,`"${t.assignee || ''}"`,`"${(t.notes || '').replace(/\n/g, ' ')}"`].join(","))];
     const blob = new Blob(["\uFEFF" + csvRows.join("\n")], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `Event_Tasks_${new Date().toISOString().split('T')[0]}.csv`;
+    link.download = `Etkinlik_Gorevleri_${new Date().toISOString().split('T')[0]}.csv`;
     link.click();
   };
 
@@ -244,8 +246,8 @@ export default function App() {
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
             <div className="flex items-center gap-3">
               <div className="flex gap-1">
-                <button onClick={() => setViewMode('board')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>Board</button>
-                <button onClick={() => setViewMode('list')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'list' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>List</button>
+                <button onClick={() => setViewMode('board')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>Pano</button>
+                <button onClick={() => setViewMode('list')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${viewMode === 'list' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}>Liste</button>
               </div>
               
               <div className="h-6 w-px bg-slate-200 mx-1"></div>
@@ -253,16 +255,17 @@ export default function App() {
               <div className="flex items-center gap-3">
                 <button 
                   onClick={() => pullFromCloud(true)}
+                  disabled={syncStatus === 'syncing'}
                   className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all ${syncStatus === 'error' ? 'bg-red-50 border-red-200 text-red-600' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}
                 >
                   <svg className={`w-3.5 h-3.5 ${syncStatus === 'syncing' || syncStatus === 'pulling' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
                   <span className="text-[10px] font-black uppercase tracking-widest">
-                    {syncStatus === 'error' ? 'Retry Sync' : syncStatus === 'syncing' ? 'Saving...' : syncStatus === 'pulling' ? 'Checking...' : 'Sync Now'}
+                    {syncStatus === 'error' ? 'Hata / Tekrarla' : syncStatus === 'syncing' ? 'Kaydediliyor' : syncStatus === 'pulling' ? 'Kontrol' : 'Senkronize Et'}
                   </span>
                 </button>
                 <div className="flex flex-col">
-                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">Last Sync</span>
-                  <span className="text-[10px] text-slate-500 font-mono">{new Date(lastSyncTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">Son Eşleşme</span>
+                  <span className="text-[10px] text-slate-500 font-mono">{new Date(lastSyncTime).toLocaleTimeString()}</span>
                 </div>
               </div>
             </div>
@@ -270,11 +273,11 @@ export default function App() {
             <div className="flex items-center gap-2 w-full sm:w-auto">
               <button onClick={exportToCSV} className="flex-1 sm:flex-none px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-sm font-bold hover:bg-slate-200 transition-all flex items-center justify-center gap-2">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                Export
+                Dışa Aktar
               </button>
               <button onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }} className="flex-1 sm:flex-none px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-100">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                NEW TASK
+                YENİ GÖREV
               </button>
             </div>
           </div>
@@ -299,16 +302,7 @@ export default function App() {
               ))}
             </div>
           ) : (
-            <TaskListView 
-              tasks={tasks} 
-              onUpdate={updateTask} 
-              onDelete={deleteTask} 
-              onEdit={(t) => { setEditingTask(t); setIsModalOpen(true); }} 
-              categories={categories} 
-              onAddTask={(c) => { setPreselectedCategory(c); setIsModalOpen(true); }} 
-              onEditCategory={(c) => {}} 
-              onDeleteCategory={(c) => {}} 
-            />
+            <TaskListView tasks={tasks} onUpdate={updateTask} onDelete={deleteTask} onEdit={(t) => { setEditingTask(t); setIsModalOpen(true); }} categories={categories} onAddTask={(c) => { setPreselectedCategory(c); setIsModalOpen(true); }} onEditCategory={() => {}} onDeleteCategory={() => {}} />
           )}
         </div>
         <aside className="lg:w-80 shrink-0">
