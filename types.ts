@@ -25,7 +25,11 @@ export interface User {
   nickname: string;
 }
 
-export interface AppState {
+export interface ProjectData {
   tasks: Task[];
+  categories: string[];
   logs: ActivityLog[];
+  version: number;
+  lastUpdatedBy: string;
+  timestamp: number;
 }
