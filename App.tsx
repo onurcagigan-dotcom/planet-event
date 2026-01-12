@@ -10,13 +10,13 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-// Fresh stable bucket ID
-const CLOUD_BUCKET_ID = '9b2a1c8f-7e6d-4b5a-9c0d-1e2f3a4b5c6d';
-const PROJECT_NAMESPACE = 'planet_opening_v5';
+// Secondary backup sync
+const CLOUD_BUCKET_ID = 'planet-backup-' + Math.random().toString(36).substr(2, 5);
+const PROJECT_NAMESPACE = 'event_v6';
 
 const STORAGE_KEYS = {
-  USER_SESSION: 'planet_auth_v5',
-  LOCAL_BACKUP: 'planet_cache_v5'
+  USER_SESSION: 'planet_auth_v6',
+  LOCAL_DB: 'planet_db_v6'
 };
 
 export default function App() {
@@ -25,28 +25,25 @@ export default function App() {
   const [categories, setCategories] = useState<string[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [viewMode, setViewMode] = useState<'list' | 'board'>('list');
-  const [syncStatus, setSyncStatus] = useState<'online' | 'syncing' | 'offline' | 'error' | 'success'>('online');
-  const [lastSync, setLastSync] = useState<number>(Date.now());
+  const [syncStatus, setSyncStatus] = useState<'local' | 'saving' | 'error' | 'success'>('local');
+  const [lastSaved, setLastSaved] = useState<number>(Date.now());
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isReady, setIsReady] = useState(false);
 
-  const isSyncingRef = useRef(false);
-  const dataVersionRef = useRef(0);
+  // File Input Ref for Import
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const getApiUrl = () => `https://kvdb.io/${CLOUD_BUCKET_ID}/${PROJECT_NAMESPACE}`;
-
-  // 1. Initial Load
+  // 1. Initial Load from LocalStorage
   useEffect(() => {
     const savedSession = localStorage.getItem(STORAGE_KEYS.USER_SESSION);
     if (savedSession) setUser(JSON.parse(savedSession));
 
-    const localData = localStorage.getItem(STORAGE_KEYS.LOCAL_BACKUP);
+    const localData = localStorage.getItem(STORAGE_KEYS.LOCAL_DB);
     if (localData) {
       const parsed = JSON.parse(localData);
       setTasks(parsed.tasks || INITIAL_TASKS);
       setCategories(parsed.categories || DEFAULT_CATEGORIES);
       setLogs(parsed.logs || []);
-      dataVersionRef.current = parsed.version || 0;
     } else {
       setTasks(INITIAL_TASKS);
       setCategories(DEFAULT_CATEGORIES);
@@ -54,87 +51,77 @@ export default function App() {
     setIsReady(true);
   }, []);
 
-  // 2. Cloud Save (Manual Trigger)
-  const saveToCloud = async (currentData?: Partial<ProjectData>) => {
-    if (isSyncingRef.current || !navigator.onLine || !user?.isAdmin) return;
+  // 2. Save Logic (Primary: LocalStorage, Secondary: Optional Cloud)
+  const performSave = async () => {
+    if (!user?.isAdmin) return;
     
-    isSyncingRef.current = true;
-    setSyncStatus('syncing');
-
-    const nextVersion = dataVersionRef.current + 1;
+    setSyncStatus('saving');
+    
     const payload: ProjectData = {
-      tasks: currentData?.tasks || tasks,
-      categories: currentData?.categories || categories,
-      logs: (currentData?.logs || logs).slice(0, 50),
-      version: nextVersion,
+      tasks,
+      categories,
+      logs: logs.slice(0, 50),
+      version: Date.now(),
       lastUpdatedBy: user.nickname,
       timestamp: Date.now()
     };
 
     try {
-      const response = await fetch(getApiUrl(), {
+      // Save to Browser
+      localStorage.setItem(STORAGE_KEYS.LOCAL_DB, JSON.stringify(payload));
+      
+      // Optional Cloud Sync (Fire and Forget)
+      fetch(`https://kvdb.io/${CLOUD_BUCKET_ID}/${PROJECT_NAMESPACE}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      });
+      }).catch(() => console.log("Cloud backup skipped - Network restricted"));
 
-      if (!response.ok) throw new Error('Network response was not ok');
-
-      dataVersionRef.current = nextVersion;
-      setLastSync(Date.now());
+      setLastSaved(Date.now());
       setSyncStatus('success');
       setHasUnsavedChanges(false);
-      localStorage.setItem(STORAGE_KEYS.LOCAL_BACKUP, JSON.stringify(payload));
       
-      // Revert status to online after 3 seconds
-      setTimeout(() => setSyncStatus('online'), 3000);
+      setTimeout(() => setSyncStatus('local'), 2000);
     } catch (error) {
-      console.error('Save Error:', error);
       setSyncStatus('error');
-    } finally {
-      isSyncingRef.current = false;
     }
   };
 
-  // 3. Cloud Load (Background Fetch)
-  const loadFromCloud = useCallback(async (isSilent = false) => {
-    // Don't pull if we are currently syncing or have unsaved local work
-    if (isSyncingRef.current || !navigator.onLine || hasUnsavedChanges) return;
-    if (!isSilent) setSyncStatus('syncing');
+  // 3. Export to File (JSON)
+  const exportToFile = () => {
+    const data = { tasks, categories, logs, exportedAt: new Date().toISOString() };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `planet_event_backup_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
-    try {
-      const response = await fetch(`${getApiUrl()}?t=${Date.now()}`);
-      
-      if (response.status === 404) {
-        setSyncStatus('online'); // Bucket doesn't exist yet, that's okay
-        return;
+  // 4. Import from File (JSON)
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const json = JSON.parse(event.target?.result as string);
+        if (json.tasks && json.categories) {
+          setTasks(json.tasks);
+          setCategories(json.categories);
+          setLogs(json.logs || []);
+          setHasUnsavedChanges(true);
+          alert("Data imported successfully. Click SAVE to finalize.");
+        }
+      } catch (err) {
+        alert("Invalid file format.");
       }
-
-      if (!response.ok) throw new Error('Fetch Error');
-
-      const cloudData: ProjectData = await response.json();
-      
-      if (cloudData.version > dataVersionRef.current) {
-        setTasks(cloudData.tasks);
-        setCategories(cloudData.categories);
-        setLogs(cloudData.logs);
-        dataVersionRef.current = cloudData.version;
-        setLastSync(Date.now());
-        localStorage.setItem(STORAGE_KEYS.LOCAL_BACKUP, JSON.stringify(cloudData));
-      }
-      setSyncStatus('online');
-    } catch (error) {
-      if (!isSilent) setSyncStatus('error');
-    }
-  }, [hasUnsavedChanges]);
-
-  // Sync Cycle
-  useEffect(() => {
-    if (!isReady || !user) return;
-    loadFromCloud(true);
-    const syncInterval = setInterval(() => loadFromCloud(true), 15000);
-    return () => clearInterval(syncInterval);
-  }, [isReady, user, loadFromCloud]);
+    };
+    reader.readAsText(file);
+  };
 
   const applyChanges = (newTasks: Task[], newCats: string[], newLogs: ActivityLog[]) => {
     if (!user?.isAdmin) return;
@@ -142,6 +129,8 @@ export default function App() {
     setCategories(newCats);
     setLogs(newLogs);
     setHasUnsavedChanges(true);
+    // Auto-save to localstorage for safety
+    localStorage.setItem(STORAGE_KEYS.LOCAL_DB, JSON.stringify({ tasks: newTasks, categories: newCats, logs: newLogs }));
   };
 
   const handleUpdateTask = (id: string, updates: Partial<Task>) => {
@@ -221,14 +210,14 @@ export default function App() {
                 <button onClick={() => setViewMode('board')} className={`px-5 py-2 rounded-lg text-[10px] font-black transition-all ${viewMode === 'board' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>BOARD</button>
               </div>
 
-              <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50/50 rounded-xl border border-indigo-100 min-w-[160px]">
-                <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'syncing' ? 'bg-amber-400 animate-pulse' : syncStatus === 'error' ? 'bg-red-500' : syncStatus === 'success' ? 'bg-emerald-500' : 'bg-emerald-500 shadow-sm shadow-emerald-200'}`}></div>
+              <div className="flex items-center gap-3 px-4 py-2 bg-slate-50 rounded-xl border border-slate-200 min-w-[180px]">
+                <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'saving' ? 'bg-amber-400 animate-pulse' : syncStatus === 'success' ? 'bg-emerald-500' : 'bg-indigo-500 shadow-sm'}`}></div>
                 <div className="flex flex-col">
-                  <span className="text-[10px] font-black uppercase text-indigo-900 leading-none">
-                    {syncStatus === 'syncing' ? 'Syncing...' : syncStatus === 'error' ? 'Sync Error' : syncStatus === 'success' ? 'Saved!' : 'Connected'}
+                  <span className="text-[10px] font-black uppercase text-slate-700 leading-none">
+                    {syncStatus === 'saving' ? 'SECURING...' : syncStatus === 'success' ? 'DATA SAVED' : 'LOCAL DATABASE'}
                   </span>
-                  <span className="text-[9px] text-indigo-500 font-bold mt-1 uppercase">
-                    v.{dataVersionRef.current} | {new Date(lastSync).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  <span className="text-[9px] text-slate-400 font-bold mt-1 uppercase">
+                    Last: {new Date(lastSaved).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </div>
               </div>
@@ -241,14 +230,23 @@ export default function App() {
                   <span className="text-[10px] font-black uppercase tracking-tight">View Only Mode</span>
                 </div>
               ) : (
-                <div className="flex items-center gap-3 w-full md:w-auto">
+                <div className="flex items-center gap-2 w-full md:w-auto">
+                  <div className="flex bg-slate-100 p-1 rounded-xl mr-2">
+                    <button onClick={exportToFile} className="px-3 py-1.5 hover:bg-white rounded-lg transition-all" title="Download JSON Backup">
+                      <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                    </button>
+                    <button onClick={() => fileInputRef.current?.click()} className="px-3 py-1.5 hover:bg-white rounded-lg transition-all" title="Upload JSON Backup">
+                      <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                    </button>
+                    <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".json" className="hidden" />
+                  </div>
+                  
                   <button 
-                    onClick={() => saveToCloud()}
-                    disabled={syncStatus === 'syncing'}
-                    className={`flex-grow md:flex-none px-6 py-2.5 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 border-2 ${hasUnsavedChanges ? 'bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-200 animate-bounce-subtle' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50'}`}
+                    onClick={performSave}
+                    className={`flex-grow md:flex-none px-6 py-2.5 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 border-2 ${hasUnsavedChanges ? 'bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-200' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50'}`}
                   >
-                    <svg className={`w-4 h-4 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                    {syncStatus === 'syncing' ? 'SAVING...' : 'SAVE TO CLOUD'}
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
+                    {syncStatus === 'saving' ? 'SAVING...' : 'SAVE CHANGES'}
                   </button>
                   <button 
                     onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
@@ -307,16 +305,6 @@ export default function App() {
           <ActivitySidebar logs={logs} />
         </aside>
       </main>
-
-      <style>{`
-        @keyframes bounce-subtle {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-2px); }
-        }
-        .animate-bounce-subtle {
-          animation: bounce-subtle 2s infinite ease-in-out;
-        }
-      `}</style>
 
       {isModalOpen && (
         <TaskFormModal 
