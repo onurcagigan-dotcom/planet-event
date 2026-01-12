@@ -10,13 +10,12 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-// Permanent valid UUID for consistent cloud sync
 const CLOUD_BUCKET_ID = '3a2e1c5f-4e9a-8d6b-0f1e-2d3c4b5a6d7e';
 const PROJECT_NAMESPACE = 'planet_opening_v3';
 
 const STORAGE_KEYS = {
-  USER_SESSION: 'planet_auth_v3',
-  LOCAL_BACKUP: 'planet_cache_v3'
+  USER_SESSION: 'planet_auth_v4',
+  LOCAL_BACKUP: 'planet_cache_v4'
 };
 
 export default function App() {
@@ -35,7 +34,6 @@ export default function App() {
 
   const getApiUrl = () => `https://kvdb.io/${CLOUD_BUCKET_ID}/${PROJECT_NAMESPACE}`;
 
-  // 1. Initial Setup
   useEffect(() => {
     const savedSession = localStorage.getItem(STORAGE_KEYS.USER_SESSION);
     if (savedSession) {
@@ -57,9 +55,11 @@ export default function App() {
     setIsReady(true);
   }, []);
 
-  // 2. Cloud Save (ADMIN ONLY)
   const saveToCloud = async (currentData?: Partial<ProjectData>) => {
-    if (isSyncing.current || !navigator.onLine || !user?.isAdmin) return;
+    if (isSyncing.current || !navigator.onLine || !user?.isAdmin) {
+       if (!user?.isAdmin) console.warn("Only Admin can save to cloud.");
+       return;
+    }
     
     isSyncing.current = true;
     setSyncStatus('syncing');
@@ -81,7 +81,7 @@ export default function App() {
         body: JSON.stringify(payload)
       });
 
-      if (!response.ok) throw new Error('Sync Format Error');
+      if (!response.ok) throw new Error('Sync failed');
 
       dataVersion.current = nextVersion;
       setLastSync(Date.now());
@@ -96,7 +96,6 @@ export default function App() {
     }
   };
 
-  // 3. Cloud Load (Everyone can pull)
   const loadFromCloud = useCallback(async (isSilent = false) => {
     if (isSyncing.current || !navigator.onLine || unsavedChanges.current) return;
     if (!isSilent) setSyncStatus('syncing');
@@ -127,30 +126,21 @@ export default function App() {
     }
   }, [user, tasks, categories, logs]);
 
-  // Periodic Sync
   useEffect(() => {
     if (!isReady || !user) return;
-    
     loadFromCloud(true);
-
     const syncInterval = setInterval(() => {
-      if (unsavedChanges.current && user.isAdmin) {
-        saveToCloud();
-      } else {
-        loadFromCloud(true);
-      }
-    }, 15000);
-
+      loadFromCloud(true);
+    }, 20000);
     return () => clearInterval(syncInterval);
   }, [isReady, user, loadFromCloud]);
 
   const applyChanges = (newTasks: Task[], newCats: string[], newLogs: ActivityLog[]) => {
-    if (!user?.isAdmin) return; // Fail-safe
+    if (!user?.isAdmin) return;
     setTasks(newTasks);
     setCategories(newCats);
     setLogs(newLogs);
     unsavedChanges.current = true;
-    saveToCloud({ tasks: newTasks, categories: newCats, logs: newLogs });
   };
 
   const handleUpdateTask = (id: string, updates: Partial<Task>) => {
@@ -213,18 +203,7 @@ export default function App() {
   const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
   if (!isReady) return null;
-  
-  if (!user) {
-    return (
-      <NicknameModal 
-        onJoin={(nickname, isAdmin) => { 
-          const userData = { nickname, isAdmin };
-          setUser(userData); 
-          localStorage.setItem(STORAGE_KEYS.USER_SESSION, JSON.stringify(userData)); 
-        }} 
-      />
-    );
-  }
+  if (!user) return <NicknameModal onJoin={(n, admin) => { const ud = { nickname: n, isAdmin: admin }; setUser(ud); localStorage.setItem(STORAGE_KEYS.USER_SESSION, JSON.stringify(ud)); }} />;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
@@ -242,33 +221,42 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50/50 rounded-xl border border-indigo-100">
-                <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'syncing' ? 'bg-amber-400 animate-pulse' : syncStatus === 'error' ? 'bg-red-500' : 'bg-green-500 shadow-sm'}`}></div>
+                <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'syncing' ? 'bg-amber-400 animate-pulse' : syncStatus === 'error' ? 'bg-red-500' : 'bg-emerald-500 shadow-sm shadow-emerald-200'}`}></div>
                 <div className="flex flex-col">
                   <span className="text-[10px] font-black uppercase text-indigo-900 leading-none">
-                    {syncStatus === 'syncing' ? 'SYNCING...' : syncStatus === 'error' ? 'OFFLINE' : 'SECURE CONNECTED'}
+                    {syncStatus === 'syncing' ? 'Syncing...' : syncStatus === 'error' ? 'Sync Error' : 'Live Connection'}
                   </span>
                   <span className="text-[9px] text-indigo-500 font-bold mt-1 uppercase">
-                    Last: {new Date(lastSync).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    v.{dataVersion.current} | {new Date(lastSync).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </div>
               </div>
             </div>
 
             <div className="flex items-center gap-3 w-full md:w-auto">
-              {!user.isAdmin && (
-                <div className="bg-amber-50 text-amber-700 px-4 py-2 rounded-xl border border-amber-100 flex items-center gap-2">
+              {!user.isAdmin ? (
+                <div className="bg-amber-50 text-amber-700 px-4 py-2.5 rounded-xl border border-amber-100 flex items-center gap-2">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
                   <span className="text-[10px] font-black uppercase tracking-tight">View Only Mode</span>
                 </div>
-              )}
-              {user.isAdmin && (
-                <button 
-                  onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
-                  className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M12 4v16m8-8H4"/></svg>
-                  NEW TASK
-                </button>
+              ) : (
+                <div className="flex items-center gap-3 w-full md:w-auto">
+                   <button 
+                    onClick={() => saveToCloud()}
+                    disabled={syncStatus === 'syncing'}
+                    className={`flex-grow md:flex-none px-6 py-2.5 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 border-2 ${unsavedChanges.current ? 'bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-100' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50'}`}
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"/></svg>
+                    {syncStatus === 'syncing' ? 'SAVING...' : 'SAVE TO CLOUD'}
+                  </button>
+                  <button 
+                    onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
+                    className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2 border-2 border-indigo-600"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M12 4v16m8-8H4"/></svg>
+                    NEW TASK
+                  </button>
+                </div>
               )}
             </div>
           </div>
