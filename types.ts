@@ -23,6 +23,7 @@ export interface ActivityLog {
 
 export interface User {
   nickname: string;
+  isAdmin: boolean;
 }
 
 export interface ProjectData {

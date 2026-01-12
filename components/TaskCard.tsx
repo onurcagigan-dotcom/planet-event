@@ -8,9 +8,10 @@ interface TaskCardProps {
   onUpdate: (updates: Partial<Task>) => void;
   onDelete: () => void;
   onEdit: () => void;
+  isAdmin: boolean;
 }
 
-export const TaskCard: React.FC<TaskCardProps> = ({ task, onUpdate, onDelete, onEdit }) => {
+export const TaskCard: React.FC<TaskCardProps> = ({ task, onUpdate, onDelete, onEdit, isAdmin }) => {
   const [isEditingNotes, setIsEditingNotes] = useState(false);
   const [notes, setNotes] = useState(task.notes);
 
@@ -36,30 +37,37 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onUpdate, onDelete, on
       <div className="flex justify-between items-start mb-2">
         <h4 className="font-medium text-slate-800 text-sm flex-grow mr-2 leading-snug">{task.title}</h4>
         <div className="flex flex-col items-end gap-2">
-          <select 
-            value={task.status}
-            onChange={(e) => onUpdate({ status: e.target.value as TaskStatus })}
-            className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full outline-none cursor-pointer shadow-sm ${STATUS_COLORS[task.status]}`}
-          >
-            <option value="Pending">Pending</option>
-            <option value="In Progress">In Progress</option>
-            <option value="Completed">Completed</option>
-            <option value="Cancelled">Cancelled</option>
-          </select>
+          {isAdmin ? (
+            <select 
+              value={task.status}
+              onChange={(e) => onUpdate({ status: e.target.value as TaskStatus })}
+              className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full outline-none cursor-pointer shadow-sm ${STATUS_COLORS[task.status]}`}
+            >
+              <option value="Pending">Pending</option>
+              <option value="In Progress">In Progress</option>
+              <option value="Completed">Completed</option>
+              <option value="Cancelled">Cancelled</option>
+            </select>
+          ) : (
+             <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full shadow-sm ${STATUS_COLORS[task.status]}`}>
+              {task.status}
+             </span>
+          )}
           
-          <div className="hidden group-hover/card:flex items-center gap-1 transition-all">
-            <button onClick={onEdit} className="p-1 hover:bg-indigo-100 rounded text-slate-400 hover:text-indigo-600 transition-colors" title="Edit Task">
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-            </button>
-            <button onClick={onDelete} className="p-1 hover:bg-red-100 rounded text-slate-400 hover:text-red-600 transition-colors" title="Delete Task">
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-            </button>
-          </div>
+          {isAdmin && (
+            <div className="hidden group-hover/card:flex items-center gap-1 transition-all">
+              <button onClick={onEdit} className="p-1 hover:bg-indigo-100 rounded text-slate-400 hover:text-indigo-600 transition-colors" title="Edit Task">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+              </button>
+              <button onClick={onDelete} className="p-1 hover:bg-red-100 rounded text-slate-400 hover:text-red-600 transition-colors" title="Delete Task">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
       <div className="space-y-3">
-        {/* Deadline info */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 min-w-[100px]">
             <svg className="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
@@ -72,9 +80,8 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onUpdate, onDelete, on
           )}
         </div>
 
-        {/* Notes Section */}
         <div className="relative">
-          {isEditingNotes ? (
+          {isAdmin && isEditingNotes ? (
             <div className="space-y-2">
               <textarea 
                 value={notes}
@@ -91,19 +98,18 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onUpdate, onDelete, on
             </div>
           ) : (
             <div 
-              onClick={() => setIsEditingNotes(true)}
-              className="text-xs text-slate-500 italic bg-white p-2 rounded border border-slate-100 hover:border-slate-200 cursor-text min-h-[40px] leading-relaxed line-clamp-3 hover:line-clamp-none transition-all"
+              onClick={() => isAdmin && setIsEditingNotes(true)}
+              className={`text-xs text-slate-500 italic bg-white p-2 rounded border border-slate-100 min-h-[40px] leading-relaxed line-clamp-3 hover:line-clamp-none transition-all ${isAdmin ? 'hover:border-slate-200 cursor-text' : 'cursor-default'}`}
             >
-              {task.notes || 'Click to add notes...'}
+              {task.notes || (isAdmin ? 'Click to add notes...' : 'No notes available')}
             </div>
           )}
         </div>
 
-        {/* Footer info */}
         <div className="flex justify-between items-center text-[10px] text-slate-400 font-semibold uppercase tracking-wider pt-2 border-t border-slate-200/50">
           <span className="flex items-center gap-1">
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
-            {task.assignee || 'NONE'}
+            {task.assignee || 'UNASSIGNED'}
           </span>
           <span>{new Date(task.updatedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>
         </div>
