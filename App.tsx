@@ -10,27 +10,21 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-/**
- * V26: TITANIUM SYNC & PRIVATE BUCKET ENGINE
- * Strictly formatted v4 UUID to satisfy kvdb.io requirements.
- */
-const GLOBAL_FALLBACK_BUCKET = 'b7d3a2e1-c5f4-4e9a-8d6b-0f1e2d3c4b5a';
-const PROJECT_KEY = 'planet_titanium_v26';
-
-const STORAGE_KEYS = {
-  DB: `planet_v26_local_db`,
-  SESSION: `planet_v26_user`,
-  BUCKET_ID: `planet_v26_active_bucket`
-};
-
-type SyncState = 'active' | 'syncing' | 'local' | 'error';
-
-// Utility to generate a valid v4 UUID
-const generateUUID = () => {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+// KVDB için zorunlu UUID v4 formatı üreticisi
+const generateValidUUID = () => {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
     return v.toString(16);
   });
+};
+
+const DEFAULT_BUCKET = 'b7d3a2e1-c5f4-4e9a-8d6b-0f1e2d3c4b5a';
+const PROJECT_KEY = 'planet_opening_event';
+
+const STORAGE_KEYS = {
+  USER: 'planet_user_session',
+  LOCAL_CACHE: 'planet_data_cache'
 };
 
 export default function App() {
@@ -39,181 +33,151 @@ export default function App() {
   const [categories, setCategories] = useState<string[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [viewMode, setViewMode] = useState<'list' | 'board'>('list');
-  const [syncState, setSyncState] = useState<SyncState>('active');
-  const [version, setVersion] = useState<number>(0);
+  const [syncStatus, setSyncStatus] = useState<'online' | 'syncing' | 'offline' | 'error'>('online');
   const [lastSync, setLastSync] = useState<number>(Date.now());
   const [isReady, setIsReady] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  
-  // Dynamic Bucket Management
-  const [bucketId, setBucketId] = useState(() => {
-    return localStorage.getItem(STORAGE_KEYS.BUCKET_ID) || GLOBAL_FALLBACK_BUCKET;
-  });
+  const [workspaceId, setWorkspaceId] = useState<string>('');
 
-  const vRef = useRef(0);
   const syncLock = useRef(false);
-  const hasLocalChanges = useRef(false);
+  const currentVersion = useRef(0);
+  const hasPendingChanges = useRef(false);
 
-  const getSyncUrl = () => `https://kvdb.io/${bucketId}/${PROJECT_KEY}`;
-
-  /**
-   * SELF-HEALING: Regenerate a private bucket
-   */
-  const handleRegenerateBucket = () => {
-    if (confirm("Mevcut bulut alanı geçersiz. Sizin için tamamen yeni ve özel bir bulut kimliği oluşturulsun mu? (Bu işlemden sonra diğer kullanıcılarla tekrar eşleşmek için yeni ID'yi paylaşmanız gerekecektir.)")) {
-      const newUUID = generateUUID();
-      localStorage.setItem(STORAGE_KEYS.BUCKET_ID, newUUID);
-      setBucketId(newUUID);
-      window.location.reload();
+  // 1. Çalışma Alanı (Workspace) Belirleme
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    let wsId = params.get('ws');
+    
+    if (!wsId) {
+      // URL'de yoksa yerel hafızadan bak, o da yoksa varsayılanı kullan
+      wsId = localStorage.getItem('planet_active_ws') || DEFAULT_BUCKET;
+      const newUrl = window.location.protocol + "//" + window.location.host + window.location.pathname + `?ws=${wsId}`;
+      window.history.pushState({ path: newUrl }, '', newUrl);
     }
-  };
+    
+    setWorkspaceId(wsId);
+    localStorage.setItem('planet_active_ws', wsId);
 
-  /**
-   * CLOUD PUSH: Write to KVDB
-   */
-  const cloudPush = async (overrideData?: any) => {
-    if (syncLock.current || !navigator.onLine) {
-      if (!navigator.onLine) setSyncState('local');
-      return;
+    // Kullanıcı kontrolü
+    const savedUser = localStorage.getItem(STORAGE_KEYS.USER);
+    if (savedUser) setUser({ nickname: savedUser });
+
+    // Önbellekten verileri yükle
+    const cache = localStorage.getItem(`${STORAGE_KEYS.LOCAL_CACHE}_${wsId}`);
+    if (cache) {
+      const parsed = JSON.parse(cache);
+      setTasks(parsed.tasks);
+      setCategories(parsed.categories);
+      setLogs(parsed.logs);
+      currentVersion.current = parsed.version || 0;
+    } else {
+      setTasks(INITIAL_TASKS);
+      setCategories(DEFAULT_CATEGORIES);
     }
+    
+    setIsReady(true);
+  }, []);
 
+  const getApiUrl = () => `https://kvdb.io/${workspaceId}/${PROJECT_KEY}`;
+
+  // 2. Veri Gönderme (Push)
+  const pushData = async (forcedData?: any) => {
+    if (syncLock.current || !navigator.onLine) return;
+    
     syncLock.current = true;
-    setSyncState('syncing');
-    setErrorMessage(null);
+    setSyncStatus('syncing');
 
-    const nextV = vRef.current + 1;
+    const nextVersion = currentVersion.current + 1;
     const payload: ProjectData = {
-      tasks: overrideData?.tasks || tasks,
-      categories: overrideData?.categories || categories,
-      logs: (overrideData?.logs || logs).slice(0, 50),
-      version: nextV,
-      lastUpdatedBy: user?.nickname || 'Guest',
+      tasks: forcedData?.tasks || tasks,
+      categories: forcedData?.categories || categories,
+      logs: (forcedData?.logs || logs).slice(0, 50),
+      version: nextVersion,
+      lastUpdatedBy: user?.nickname || 'Anonim',
       timestamp: Date.now()
     };
 
     try {
-      const res = await fetch(getSyncUrl(), {
+      const response = await fetch(getApiUrl(), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      if (!res.ok) {
-        const errText = await res.text();
-        if (res.status === 404 || errText.toLowerCase().includes('invalid')) {
-          throw new Error("BULUT_ID_GECERSIZ");
-        }
-        throw new Error(`Bağlantı Hatası (${res.status})`);
-      }
+      if (!response.ok) throw new Error(await response.text());
 
-      vRef.current = nextV;
-      setVersion(nextV);
+      currentVersion.current = nextVersion;
       setLastSync(Date.now());
-      setSyncState('active');
-      hasLocalChanges.current = false;
-      localStorage.setItem(STORAGE_KEYS.DB, JSON.stringify(payload));
-    } catch (err: any) {
-      setSyncState('error');
-      setErrorMessage(err.message === "BULUT_ID_GECERSIZ" ? "Bulut Sunucusu ID formatını reddetti. Yeni bir ID üretilmesi gerekiyor." : err.message);
+      setSyncStatus('online');
+      hasPendingChanges.current = false;
+      localStorage.setItem(`${STORAGE_KEYS.LOCAL_CACHE}_${workspaceId}`, JSON.stringify(payload));
+    } catch (error) {
+      console.error('Push failed:', error);
+      setSyncStatus('error');
     } finally {
       syncLock.current = false;
     }
   };
 
-  /**
-   * CLOUD PULL: Read from KVDB
-   */
-  const cloudPull = useCallback(async (isInitial = false) => {
-    if (syncLock.current || !navigator.onLine || hasLocalChanges.current) return;
-    if (isInitial) setSyncState('syncing');
+  // 3. Veri Çekme (Pull)
+  const pullData = useCallback(async (silent = false) => {
+    if (syncLock.current || !navigator.onLine || hasPendingChanges.current) return;
+
+    if (!silent) setSyncStatus('syncing');
 
     try {
-      const res = await fetch(`${getSyncUrl()}?_v=${Date.now()}`);
+      const response = await fetch(`${getApiUrl()}?nocache=${Date.now()}`);
       
-      if (res.status === 404) {
-        const errText = await res.text();
-        if (errText.toLowerCase().includes('invalid')) throw new Error("BULUT_ID_GECERSIZ");
-        // Key missing but bucket okay -> init
-        if (isInitial) await cloudPush();
+      if (response.status === 404) {
+        // Eğer bu workspace yeni ise, ilk push'u yap
+        if (!silent) await pushData();
         return;
       }
 
-      if (!res.ok) throw new Error(`Sunucu Hatası (${res.status})`);
+      if (!response.ok) throw new Error('Pull failed');
 
-      const data = await res.json();
-      if (data && data.version > vRef.current) {
-        setTasks(data.tasks || []);
-        setCategories(data.categories || DEFAULT_CATEGORIES);
-        setLogs(data.logs || []);
-        vRef.current = data.version;
-        setVersion(data.version);
+      const remoteData: ProjectData = await response.json();
+
+      if (remoteData.version > currentVersion.current) {
+        setTasks(remoteData.tasks);
+        setCategories(remoteData.categories);
+        setLogs(remoteData.logs);
+        currentVersion.current = remoteData.version;
         setLastSync(Date.now());
-        setSyncState('active');
-        localStorage.setItem(STORAGE_KEYS.DB, JSON.stringify(data));
-      } else {
-        setSyncState('active');
+        localStorage.setItem(`${STORAGE_KEYS.LOCAL_CACHE}_${workspaceId}`, JSON.stringify(remoteData));
       }
-    } catch (err: any) {
-      if (isInitial) {
-        setSyncState('error');
-        setErrorMessage(err.message === "BULUT_ID_GECERSIZ" ? "Bulut Sunucusu ID formatını reddetti." : err.message);
-      }
+      setSyncStatus('online');
+    } catch (error) {
+      if (!silent) setSyncStatus('error');
     }
-  }, [tasks, categories, logs, user, bucketId]);
+  }, [workspaceId, user, tasks, categories, logs]);
 
-  // Initial Load
-  useEffect(() => {
-    const savedUser = localStorage.getItem(STORAGE_KEYS.SESSION);
-    if (savedUser) setUser({ nickname: savedUser });
-
-    const localData = localStorage.getItem(STORAGE_KEYS.DB);
-    if (localData) {
-      try {
-        const d = JSON.parse(localData);
-        setTasks(d.tasks || INITIAL_TASKS);
-        setCategories(d.categories || DEFAULT_CATEGORIES);
-        setLogs(d.logs || []);
-        vRef.current = d.version || 0;
-        setVersion(vRef.current);
-      } catch (e) {
-        setTasks(INITIAL_TASKS);
-      }
-    } else {
-      setTasks(INITIAL_TASKS);
-      setCategories(DEFAULT_CATEGORIES);
-    }
-    setIsReady(true);
-  }, []);
-
-  useEffect(() => {
-    if (isReady && user) {
-      const timer = setTimeout(() => cloudPull(true), 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [isReady, user, bucketId]);
-
-  // Main Sync Loop
+  // Döngüsel senkronizasyon
   useEffect(() => {
     if (!isReady || !user) return;
+    
     const interval = setInterval(() => {
-      if (hasLocalChanges.current) {
-        cloudPush();
+      if (hasPendingChanges.current) {
+        pushData();
       } else {
-        cloudPull();
+        pullData(true);
       }
-    }, 12000);
-    return () => clearInterval(interval);
-  }, [isReady, user, cloudPull, tasks, categories, logs]);
+    }, 10000); // 10 saniyede bir
 
-  /**
-   * State Handlers
-   */
-  const applyChange = (t: Task[], c: string[], l: ActivityLog[]) => {
-    setTasks(t);
-    setCategories(c);
-    setLogs(l);
-    hasLocalChanges.current = true;
-    cloudPush({ tasks: t, categories: c, logs: l });
+    return () => clearInterval(interval);
+  }, [isReady, user, pullData]);
+
+  // Workspace Değiştirme / Onarma
+  const repairWorkspace = () => {
+    const newWs = generateValidUUID();
+    window.location.href = window.location.origin + window.location.pathname + `?ws=${newWs}`;
+  };
+
+  const handleApplyChange = (newTasks: Task[], newCats: string[], newLogs: ActivityLog[]) => {
+    setTasks(newTasks);
+    setCategories(newCats);
+    setLogs(newLogs);
+    hasPendingChanges.current = true;
+    pushData({ tasks: newTasks, categories: newCats, logs: newLogs });
   };
 
   const onUpdateTask = (id: string, updates: Partial<Task>) => {
@@ -222,12 +186,12 @@ export default function App() {
     const log: ActivityLog = {
       id: Math.random().toString(36).substr(2, 9),
       taskId: id,
-      taskTitle: task?.title || 'Unknown',
+      taskTitle: task?.title || 'Bilinmiyor',
       nickname: user?.nickname || 'User',
-      action: updates.status ? `durumunu ${updates.status} yaptı` : "bilgilerini güncelledi",
+      action: updates.status ? `durumunu ${updates.status} yaptı` : "güncelledi",
       timestamp: Date.now()
     };
-    applyChange(nextTasks, categories, [log, ...logs].slice(0, 50));
+    handleApplyChange(nextTasks, categories, [log, ...logs]);
   };
 
   const onDeleteTask = (id: string) => {
@@ -239,15 +203,15 @@ export default function App() {
       taskId: id,
       taskTitle: task.title,
       nickname: user?.nickname || 'User',
-      action: "görevi sildi",
+      action: "sildi",
       timestamp: Date.now()
     };
-    applyChange(nextTasks, categories, [log, ...logs].slice(0, 50));
+    handleApplyChange(nextTasks, categories, [log, ...logs]);
   };
 
   const onFormSubmit = (data: any) => {
-    let activeCats = [...categories];
-    if (!activeCats.includes(data.category)) activeCats.push(data.category);
+    let nextCats = [...categories];
+    if (!nextCats.includes(data.category)) nextCats.push(data.category);
 
     const isEdit = !!editingTask;
     const nextTasks = isEdit 
@@ -259,11 +223,11 @@ export default function App() {
       taskId: isEdit ? editingTask!.id : 'new',
       taskTitle: data.title,
       nickname: user?.nickname || 'User',
-      action: isEdit ? "düzenledi" : "ekledi",
+      action: isEdit ? "düzenledi" : "yeni ekledi",
       timestamp: Date.now()
     };
     
-    applyChange(nextTasks, activeCats, [log, ...logs].slice(0, 50));
+    handleApplyChange(nextTasks, nextCats, [log, ...logs]);
     setIsModalOpen(false);
     setEditingTask(undefined);
   };
@@ -272,52 +236,58 @@ export default function App() {
   const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
   const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
+  const copyInviteLink = () => {
+    navigator.clipboard.writeText(window.location.href);
+    alert("Davet linki kopyalandı! Ekip arkadaşlarınız bu linkle aynı listeye erişebilir.");
+  };
+
   if (!isReady) return null;
-  if (!user) return <NicknameModal onJoin={(n) => { setUser({ nickname: n }); localStorage.setItem(STORAGE_KEYS.SESSION, n); }} />;
+  if (!user) return <NicknameModal onJoin={(n) => { setUser({ nickname: n }); localStorage.setItem(STORAGE_KEYS.USER, n); }} />;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
-      <Header user={user} onLogout={() => { setUser(null); localStorage.removeItem(STORAGE_KEYS.SESSION); }} />
+      <Header user={user} onLogout={() => { setUser(null); localStorage.removeItem(STORAGE_KEYS.USER); }} />
       
-      <main className="flex-grow container mx-auto px-4 py-4 lg:py-8 flex flex-col lg:flex-row gap-8">
+      <main className="flex-grow container mx-auto px-4 py-6 lg:py-8 flex flex-col lg:flex-row gap-8">
         <div className="flex-grow space-y-6">
           <DashboardStats tasks={tasks} />
           
-          <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-4 w-full md:w-auto">
-              <div className="flex bg-slate-100 p-1 rounded-lg shrink-0">
-                <button onClick={() => setViewMode('list')} className={`px-4 py-1.5 rounded-md text-[10px] font-black transition-all ${viewMode === 'list' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>LİSTE</button>
-                <button onClick={() => setViewMode('board')} className={`px-4 py-1.5 rounded-md text-[10px] font-black transition-all ${viewMode === 'board' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>PANEL</button>
+              <div className="flex bg-slate-100 p-1 rounded-xl">
+                <button onClick={() => setViewMode('list')} className={`px-5 py-2 rounded-lg text-[10px] font-black transition-all ${viewMode === 'list' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>LİSTE</button>
+                <button onClick={() => setViewMode('board')} className={`px-5 py-2 rounded-lg text-[10px] font-black transition-all ${viewMode === 'board' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>PANEL</button>
               </div>
 
-              <div className="flex items-center gap-2.5 px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-100 min-w-[160px]">
-                <div className={`w-2 h-2 rounded-full ${syncState === 'syncing' ? 'bg-amber-400 animate-pulse' : syncState === 'error' ? 'bg-red-500' : 'bg-green-500 shadow-sm shadow-green-200'}`}></div>
+              <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50/50 rounded-xl border border-indigo-100">
+                <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'syncing' ? 'bg-amber-400 animate-pulse' : syncStatus === 'error' ? 'bg-red-500' : 'bg-green-500 shadow-sm'}`}></div>
                 <div className="flex flex-col">
-                  <span className="text-[10px] font-black uppercase text-slate-700 leading-none tracking-tighter">
-                    {syncState === 'syncing' ? 'Eşitleniyor' : syncState === 'error' ? 'Bağlantı Yok' : 'Titanium Aktif'}
+                  <span className="text-[10px] font-black uppercase text-indigo-900 leading-none">
+                    {syncStatus === 'syncing' ? 'Eşitleniyor...' : syncStatus === 'error' ? 'Hata Oluştu' : 'Aktif'}
                   </span>
-                  <span className="text-[9px] text-slate-400 font-mono tracking-tighter mt-1">
-                    V{version} • {new Date(lastSync).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })}
+                  <span className="text-[9px] text-indigo-500 font-bold mt-1">
+                    {new Date(lastSync).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                   </span>
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 w-full md:w-auto">
-               <button 
-                onClick={() => cloudPull(true)}
-                className="p-2.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg border border-slate-200 transition-all active:scale-95"
-                title="Şimdi Yenile"
+            <div className="flex items-center gap-3 w-full md:w-auto">
+              <button 
+                onClick={copyInviteLink}
+                className="p-2.5 text-indigo-600 hover:bg-indigo-600 hover:text-white rounded-xl border border-indigo-100 transition-all active:scale-95 flex items-center gap-2 text-[10px] font-black uppercase"
+                title="Ekip Arkadaşını Davet Et"
               >
-                <svg className={`w-4 h-4 ${syncState === 'syncing' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2"/></svg>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>
+                EKİBİ DAVET ET
               </button>
-              
+
               <button 
                 onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
-                className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2 tracking-widest"
+                className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M12 4v16m8-8H4"/></svg>
-                YENİ GÖREV EKLE
+                YENİ GÖREV
               </button>
             </div>
           </div>
@@ -336,17 +306,15 @@ export default function App() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-20">
               {categories.map(category => (
-                <div key={category} className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col h-[550px]">
+                <div key={category} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col h-[550px]">
                   <div className="flex justify-between items-center mb-4 border-b border-slate-50 pb-3">
                     <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-indigo-500 shadow-sm"></span>
                       {category}
                     </h3>
-                    <div className="flex items-center gap-2">
-                       <span className="text-[10px] font-bold text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full uppercase">
-                         {tasks.filter(t => t.category === category).length} GÖREV
-                       </span>
-                    </div>
+                    <span className="text-[10px] font-bold text-slate-400 bg-slate-50 px-2.5 py-1 rounded-full">
+                      {tasks.filter(t => t.category === category).length}
+                    </span>
                   </div>
                   <div className="flex-grow overflow-y-auto custom-scrollbar space-y-3 pr-1">
                     {tasks.filter(t => t.category === category).map(task => (
@@ -376,21 +344,18 @@ export default function App() {
         />
       )}
 
-      {/* Titanium Error/Config Banner */}
-      {syncState === 'error' && (
-        <div className="fixed bottom-6 right-6 left-6 md:left-auto md:w-96 bg-slate-900 text-white p-5 rounded-2xl shadow-2xl flex flex-col gap-3 z-50 border border-slate-700 animate-in slide-in-from-bottom-4 ring-4 ring-indigo-500/10">
-          <div className="flex items-center gap-4">
-            <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
-            <p className="text-xs font-black uppercase tracking-widest leading-none">Bağlantı Kritik Hatası</p>
-          </div>
-          <p className="text-[10px] opacity-70 leading-relaxed font-medium">
-            {errorMessage?.includes('BULUT_ID_GECERSIZ') 
-              ? "Sunucu bu havuz kimliğini reddetti. KVDB kuralları gereği kimlik v4 UUID formatında olmalıdır." 
-              : (errorMessage || "Sunucuya ulaşılamıyor. İnternet bağlantınızı kontrol edin.")}
+      {syncStatus === 'error' && (
+        <div className="fixed bottom-6 right-6 left-6 md:left-auto md:w-96 bg-slate-900 text-white p-6 rounded-2xl shadow-2xl z-50 border border-slate-700 animate-in slide-in-from-bottom-8">
+          <h4 className="text-xs font-black uppercase text-red-500 mb-2 flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+            SİSTEM BAĞLANTISI KESİLDİ
+          </h4>
+          <p className="text-[11px] text-slate-400 mb-4 leading-relaxed font-medium">
+            Sunucu ID formatını reddetti veya ağ erişimi engellendi. Mevcut ID'yi onarabilir veya yeni bir temiz çalışma alanı oluşturabilirsiniz.
           </p>
-          <div className="flex gap-2 mt-1">
-            <button onClick={() => cloudPush()} className="bg-white/10 hover:bg-white/20 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex-grow border border-white/5">TEKRAR DENE</button>
-            <button onClick={handleRegenerateBucket} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all shadow-lg shadow-indigo-900/50">YENİ ID ÜRET</button>
+          <div className="flex gap-2">
+            <button onClick={() => pullData()} className="bg-white/10 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-white/20 transition-all flex-grow">Yenile</button>
+            <button onClick={repairWorkspace} className="bg-indigo-600 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-indigo-500 transition-all shadow-lg">Kendini Onar</button>
           </div>
         </div>
       )}
