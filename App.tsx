@@ -10,14 +10,14 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-const STORAGE_KEY_TASKS = 'planet_event_tasks';
-const STORAGE_KEY_LOGS = 'planet_event_logs';
-const STORAGE_KEY_USER = 'planet_event_user';
-const STORAGE_KEY_CATEGORIES = 'planet_event_categories';
-const STORAGE_KEY_LAST_UPDATE = 'planet_event_last_sync_ts';
+const STORAGE_KEY_TASKS = 'planet_v6_tasks';
+const STORAGE_KEY_LOGS = 'planet_v6_logs';
+const STORAGE_KEY_USER = 'planet_v6_user';
+const STORAGE_KEY_CATEGORIES = 'planet_v6_categories';
+const STORAGE_KEY_LAST_UPDATE = 'planet_v6_last_sync_ts';
 
-// Dedicated KVDB bucket for Planet Event Track
-const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_sync_prod_v5';
+// Using a fresh KVDB path for better reliability
+const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_sync_stable_v6';
 
 type ViewMode = 'board' | 'list';
 type SyncStatus = 'synced' | 'syncing' | 'error' | 'checking';
@@ -32,27 +32,34 @@ export default function App() {
   const [lastSyncTime, setLastSyncTime] = useState<number>(Date.now());
   const [isInitializing, setIsInitializing] = useState(true);
 
-  // Use refs to avoid stale closures in intervals
+  // Critical refs for state management outside of the render cycle
   const lastUpdateRef = useRef<number>(0);
-  const syncLockRef = useRef<boolean>(false);
-  
+  const isSyncingRef = useRef<boolean>(false);
+  const stateRef = useRef({ tasks, categories, logs });
+
+  // Update stateRef whenever main state changes to ensure sync always has latest data
+  useEffect(() => {
+    stateRef.current = { tasks, categories, logs };
+  }, [tasks, categories, logs]);
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
   const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
   /**
-   * Pushes current state to cloud
+   * Core Push Function
+   * Persists current local state to the cloud.
    */
-  const pushToCloud = async (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
-    if (syncLockRef.current) return;
-    syncLockRef.current = true;
+  const pushToCloud = async () => {
+    if (isSyncingRef.current) return;
+    isSyncingRef.current = true;
     setSyncStatus('syncing');
 
     const timestamp = Date.now();
     const payload = {
-      tasks: newTasks,
-      categories: newCategories,
-      logs: newLogs,
+      tasks: stateRef.current.tasks,
+      categories: stateRef.current.categories,
+      logs: stateRef.current.logs,
       lastUpdate: timestamp
     };
 
@@ -62,7 +69,6 @@ export default function App() {
 
       const response = await fetch(SYNC_URL, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         signal: controller.signal
       });
@@ -75,21 +81,23 @@ export default function App() {
         setLastSyncTime(Date.now());
         setSyncStatus('synced');
       } else {
-        throw new Error('Cloud push failed');
+        console.error('Push failed with status:', response.status);
+        setSyncStatus('error');
       }
     } catch (error) {
       console.error('Push Error:', error);
       setSyncStatus('error');
     } finally {
-      syncLockRef.current = false;
+      isSyncingRef.current = false;
     }
   };
 
   /**
-   * Pulls state from cloud and updates if newer
+   * Core Pull Function
+   * Checks cloud for updates and reconciles if cloud is newer.
    */
   const pullFromCloud = useCallback(async (isManual = false) => {
-    if (syncLockRef.current && !isManual) return;
+    if (isSyncingRef.current) return;
     
     setSyncStatus(isManual ? 'syncing' : 'checking');
     try {
@@ -102,15 +110,15 @@ export default function App() {
       if (response.ok) {
         const text = await response.text();
         if (!text || text.trim() === "") {
-          // If cloud is empty, initialize it with current local state
-          if (isManual) await pushToCloud(tasks, categories, logs);
-          setSyncStatus('synced');
+          // Empty cloud bucket - if manual, we push our local state to initialize it
+          if (isManual) await pushToCloud();
+          else setSyncStatus('synced');
           return;
         }
 
         const cloudData = JSON.parse(text);
         
-        // Update local only if cloud is newer
+        // Only update if cloud has a newer timestamp
         if (cloudData.lastUpdate > lastUpdateRef.current) {
           setTasks(cloudData.tasks);
           setCategories(cloudData.categories);
@@ -124,19 +132,21 @@ export default function App() {
           localStorage.setItem(STORAGE_KEY_LAST_UPDATE, cloudData.lastUpdate.toString());
         }
         setSyncStatus('synced');
+      } else {
+        setSyncStatus('error');
       }
     } catch (error) {
       console.error('Pull Error:', error);
       setSyncStatus('error');
     } finally {
-      // Small delay to show "checking" state for UX
+      // Small delay for UX feedback
       if (!isManual) {
-        setTimeout(() => setSyncStatus(prev => prev === 'checking' ? 'synced' : prev), 1000);
+        setTimeout(() => setSyncStatus(prev => (prev === 'checking' || prev === 'syncing') ? 'synced' : prev), 1000);
       }
     }
-  }, [tasks, categories, logs]);
+  }, []);
 
-  // Initial Data Loading
+  // Initialization
   useEffect(() => {
     const savedUser = localStorage.getItem(STORAGE_KEY_USER);
     if (savedUser) setUser({ nickname: savedUser });
@@ -157,23 +167,23 @@ export default function App() {
 
     setIsInitializing(false);
     
-    // Initial fetch from cloud
-    setTimeout(() => pullFromCloud(false), 500);
-  }, []);
+    // Check cloud on startup
+    setTimeout(() => pullFromCloud(false), 800);
+  }, [pullFromCloud]);
 
-  // Polling Mechanism (Every 8 seconds)
+  // Polling every 10 seconds to keep clients in sync
   useEffect(() => {
     if (isInitializing || !user) return;
     const interval = setInterval(() => {
-      if (syncStatus !== 'syncing') pullFromCloud();
-    }, 8000);
+      if (syncStatus === 'synced') pullFromCloud(false);
+    }, 10000);
     return () => clearInterval(interval);
   }, [isInitializing, user, pullFromCloud, syncStatus]);
 
   /**
-   * Global state updater that also triggers cloud sync
+   * Updates local state and immediately triggers a cloud push
    */
-  const saveStateAndSync = (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
+  const handleDataChange = (newTasks: Task[], newCategories: string[], newLogs: ActivityLog[]) => {
     setTasks(newTasks);
     setCategories(newCategories);
     setLogs(newLogs);
@@ -182,7 +192,12 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY_CATEGORIES, JSON.stringify(newCategories));
     localStorage.setItem(STORAGE_KEY_LOGS, JSON.stringify(newLogs));
     
-    pushToCloud(newTasks, newCategories, newLogs);
+    // Update local lastUpdate timestamp before pushing
+    lastUpdateRef.current = Date.now();
+    localStorage.setItem(STORAGE_KEY_LAST_UPDATE, lastUpdateRef.current.toString());
+    
+    // Trigger push with a slight delay to allow state to settle
+    setTimeout(() => pushToCloud(), 100);
   };
 
   const addLog = (taskId: string, title: string, action: string, currentTasks: Task[], currentCategories: string[], currentLogs: ActivityLog[]) => {
@@ -195,7 +210,7 @@ export default function App() {
       timestamp: Date.now()
     };
     const updatedLogs = [newLog, ...currentLogs].slice(0, 50);
-    saveStateAndSync(currentTasks, currentCategories, updatedLogs);
+    handleDataChange(currentTasks, currentCategories, updatedLogs);
   };
 
   const updateTask = (id: string, updates: Partial<Task>) => {
@@ -203,8 +218,8 @@ export default function App() {
     if (!task) return;
     
     let actionLabel = "updated";
-    if (updates.status && updates.status !== task.status) actionLabel = `changed status to ${updates.status}`;
-    else if (updates.assignee !== undefined) actionLabel = `assigned to ${updates.assignee || 'None'}`;
+    if (updates.status && updates.status !== task.status) actionLabel = `status: ${updates.status}`;
+    else if (updates.assignee !== undefined) actionLabel = `assigned to ${updates.assignee || 'Unassigned'}`;
     
     const newTasks = tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t);
     addLog(id, task.title, actionLabel, newTasks, categories, logs);
@@ -212,9 +227,9 @@ export default function App() {
 
   const deleteTask = (id: string) => {
     const task = tasks.find(t => t.id === id);
-    if (!task || !confirm(`Are you sure you want to delete "${task.title}"?`)) return;
+    if (!task || !confirm(`Delete "${task.title}" permanently?`)) return;
     const newTasks = tasks.filter(t => t.id !== id);
-    addLog(id, task.title, "deleted", newTasks, categories, logs);
+    addLog(id, task.title, "removed task", newTasks, categories, logs);
   };
 
   const handleFormSubmit = (data: { title: string, category: string, deadline: string | null, notes: string, assignee: string | null }) => {
@@ -225,7 +240,7 @@ export default function App() {
 
     if (editingTask) {
       const newTasks = tasks.map(t => t.id === editingTask.id ? { ...t, ...data, updatedAt: Date.now() } : t);
-      addLog(editingTask.id, data.title, "modified details", newTasks, currentCategories, logs);
+      addLog(editingTask.id, data.title, "updated details", newTasks, currentCategories, logs);
     } else {
       const newTask: Task = {
         id: Math.random().toString(36).substr(2, 9),
@@ -238,7 +253,7 @@ export default function App() {
         updatedAt: Date.now()
       };
       const newTasks = [...tasks, newTask];
-      addLog(newTask.id, newTask.title, "added", newTasks, currentCategories, logs);
+      addLog(newTask.id, newTask.title, "created new task", newTasks, currentCategories, logs);
     }
     setIsModalOpen(false);
     setEditingTask(undefined);
@@ -250,7 +265,7 @@ export default function App() {
     const blob = new Blob(["\uFEFF" + csvRows.join("\n")], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `Event_Task_Report_${new Date().toISOString().split('T')[0]}.csv`;
+    link.download = `Planet_Event_Export_${new Date().toISOString().split('T')[0]}.csv`;
     link.click();
   };
 
@@ -282,12 +297,12 @@ export default function App() {
                 >
                   <svg className={`w-3.5 h-3.5 ${syncStatus === 'syncing' || syncStatus === 'checking' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
                   <span className="text-[10px] font-black uppercase tracking-widest">
-                    {syncStatus === 'error' ? 'Sync Error' : syncStatus === 'syncing' ? 'Saving...' : syncStatus === 'checking' ? 'Checking...' : 'Sync Now'}
+                    {syncStatus === 'error' ? 'RETRY SYNC' : syncStatus === 'syncing' ? 'SAVING...' : syncStatus === 'checking' ? 'CHECKING...' : 'SYNC NOW'}
                   </span>
                 </button>
                 <div className="flex flex-col">
-                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter">Last Sync</span>
-                  <span className="text-[10px] text-slate-500 font-mono leading-none">{new Date(lastSyncTime).toLocaleTimeString([], { hour12: false })}</span>
+                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter leading-none">Last Synced</span>
+                  <span className="text-[10px] text-slate-500 font-mono leading-tight">{new Date(lastSyncTime).toLocaleTimeString([], { hour12: false })}</span>
                 </div>
               </div>
             </div>
@@ -320,7 +335,7 @@ export default function App() {
                       <TaskCard key={task.id} task={task} onUpdate={(u) => updateTask(task.id, u)} onDelete={() => deleteTask(task.id)} onEdit={() => { setEditingTask(task); setIsModalOpen(true); }} />
                     ))}
                     {tasks.filter(t => t.category === category).length === 0 && (
-                      <div className="h-full flex items-center justify-center text-slate-300 text-xs italic font-medium">No tasks yet</div>
+                      <div className="h-full flex items-center justify-center text-slate-300 text-xs italic font-medium">Empty bucket</div>
                     )}
                   </div>
                 </div>
