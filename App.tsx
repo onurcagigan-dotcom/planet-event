@@ -10,14 +10,16 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-// V14: High-Reliability Drive Simulation
-const PROJECT_ID = 'planet_event_master_v14';
-const SYNC_ENDPOINT = `https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/${PROJECT_ID}`;
-const LOCAL_STORAGE_KEY = `local_${PROJECT_ID}_data`;
-const USER_STORAGE_KEY = `local_${PROJECT_ID}_user`;
+// V15: Enhanced Reliability Protocol
+const PROJECT_UUID = 'planet_drive_v15_final';
+const SYNC_URL = `https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/${PROJECT_UUID}`;
+const STORAGE_KEYS = {
+  USER: `user_${PROJECT_UUID}`,
+  DATA: `data_${PROJECT_UUID}`
+};
 
 type ViewMode = 'board' | 'list';
-type SyncState = 'idle' | 'saving' | 'fetching' | 'conflict' | 'offline' | 'error';
+type SyncStatus = 'online' | 'saving' | 'reconnecting' | 'error';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -25,108 +27,114 @@ export default function App() {
   const [categories, setCategories] = useState<string[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
-  const [syncState, setSyncState] = useState<SyncState>('idle');
-  const [lastSync, setLastSync] = useState<number>(Date.now());
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('online');
+  const [lastSyncTs, setLastSyncTs] = useState<number>(Date.now());
   const [version, setVersion] = useState<number>(0);
-  const [isReady, setIsReady] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
 
-  // Refs for background sync management
-  const syncLock = useRef(false);
-  const retryCount = useRef(0);
-  const pendingChanges = useRef(false);
+  // Sync Logic Refs
+  const currentVersion = useRef<number>(0);
+  const isBusy = useRef<boolean>(false);
+  const pendingSync = useRef<boolean>(false);
+  const consecutiveFailures = useRef<number>(0);
 
   /**
-   * CORE: SAVE TO CLOUD (DRIVE STYLE)
+   * PUSH: Drive-style Upload
    */
-  const saveToCloud = async (forceData?: ProjectData) => {
-    if (syncLock.current || !navigator.onLine) {
-      pendingChanges.current = true;
+  const uploadToCloud = async (overrideData?: any) => {
+    if (isBusy.current || !navigator.onLine) {
+      pendingSync.current = true;
       return;
     }
 
-    syncLock.current = true;
-    setSyncState('saving');
+    isBusy.current = true;
+    setSyncStatus('saving');
 
-    const dataToSave: ProjectData = forceData || {
-      tasks,
-      categories,
-      logs,
-      version: version + 1,
-      lastUpdatedBy: user?.nickname || 'Unknown',
+    const nextVersion = currentVersion.current + 1;
+    const payload: ProjectData = {
+      tasks: overrideData?.tasks || tasks,
+      categories: overrideData?.categories || categories,
+      logs: overrideData?.logs || logs,
+      version: nextVersion,
+      lastUpdatedBy: user?.nickname || 'Team',
       timestamp: Date.now()
     };
 
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-
-      const response = await fetch(SYNC_ENDPOINT, {
+      const response = await fetch(SYNC_URL, {
         method: 'PUT',
-        mode: 'cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(dataToSave),
-        signal: controller.signal
+        body: JSON.stringify(payload),
+        mode: 'cors'
       });
 
-      clearTimeout(timeout);
+      if (!response.ok) throw new Error('Cloud push rejected');
 
-      if (!response.ok) throw new Error('Cloud rejected save');
-
-      // Success
-      setVersion(dataToSave.version);
-      setLastSync(Date.now());
-      setSyncState('idle');
-      retryCount.current = 0;
-      pendingChanges.current = false;
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(dataToSave));
+      currentVersion.current = nextVersion;
+      setVersion(nextVersion);
+      setLastSyncTs(Date.now());
+      setSyncStatus('online');
+      consecutiveFailures.current = 0;
+      pendingSync.current = false;
+      
+      // Save locally as backup
+      localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify(payload));
     } catch (err) {
-      console.error('Save failed:', err);
-      setSyncState('error');
-      retryCount.current++;
-      pendingChanges.current = true;
+      console.warn('Sync delayed:', err);
+      setSyncStatus('reconnecting');
+      consecutiveFailures.current++;
+      pendingSync.current = true;
     } finally {
-      syncLock.current = false;
+      isBusy.current = false;
     }
   };
 
   /**
-   * CORE: FETCH FROM CLOUD
+   * PULL: Drive-style Fetch
    */
-  const fetchFromCloud = useCallback(async (isInitial = false) => {
-    if (syncLock.current || !navigator.onLine) return;
+  const downloadFromCloud = useCallback(async (isInitial = false) => {
+    if (isBusy.current || !navigator.onLine) return;
     
-    setSyncState(isInitial ? 'fetching' : 'idle');
+    if (isInitial) setSyncStatus('saving');
+    
     try {
-      const response = await fetch(`${SYNC_ENDPOINT}?nocache=${Date.now()}`, { cache: 'no-store' });
+      const response = await fetch(`${SYNC_URL}?nocache=${Date.now()}`);
       if (!response.ok) return;
 
-      const text = await response.text();
-      if (!text) return;
+      const dataText = await response.text();
+      if (!dataText || dataText.trim() === "") {
+        // First time setup: push current local state
+        if (isInitial) await uploadToCloud();
+        return;
+      }
 
-      const cloudData: ProjectData = JSON.parse(text);
+      const cloudData: ProjectData = JSON.parse(dataText);
 
-      // Conflict Resolution: Only update if cloud has a higher version
-      if (cloudData.version > version) {
+      // Version check for conflict resolution
+      if (cloudData.version > currentVersion.current) {
         setTasks(cloudData.tasks);
         setCategories(cloudData.categories);
         setLogs(cloudData.logs);
         setVersion(cloudData.version);
-        setLastSync(Date.now());
-        localStorage.setItem(LOCAL_STORAGE_KEY, text);
+        currentVersion.current = cloudData.version;
+        setLastSyncTs(Date.now());
+        localStorage.setItem(STORAGE_KEYS.DATA, dataText);
       }
+      setSyncStatus('online');
+      consecutiveFailures.current = 0;
     } catch (err) {
-      console.warn('Silent fetch failed');
+      console.warn('Silent pull failed');
+      if (isInitial) setSyncStatus('error');
     } finally {
-      setSyncState('idle');
+      if (isInitial) setSyncStatus('online');
     }
-  }, [version]);
+  }, [tasks, categories, logs]);
 
-  // Initial Hydration
+  // Bootup Initialization
   useEffect(() => {
-    const savedUser = localStorage.getItem(USER_STORAGE_KEY);
+    const savedUser = localStorage.getItem(STORAGE_KEYS.USER);
     if (savedUser) setUser({ nickname: savedUser });
 
-    const localCache = localStorage.getItem(LOCAL_STORAGE_KEY);
+    const localCache = localStorage.getItem(STORAGE_KEYS.DATA);
     if (localCache) {
       try {
         const d = JSON.parse(localCache);
@@ -134,6 +142,7 @@ export default function App() {
         setCategories(d.categories);
         setLogs(d.logs);
         setVersion(d.version || 0);
+        currentVersion.current = d.version || 0;
       } catch (e) {
         setTasks(INITIAL_TASKS);
         setCategories(DEFAULT_CATEGORIES);
@@ -143,69 +152,62 @@ export default function App() {
       setCategories(DEFAULT_CATEGORIES);
     }
     
-    setIsReady(true);
-    setTimeout(() => fetchFromCloud(true), 500);
+    setIsInitializing(false);
+    setTimeout(() => downloadFromCloud(true), 1000);
   }, []);
 
-  // Background Heartbeat (Every 10 seconds)
+  // Drive-style Pulse (Every 8 seconds)
   useEffect(() => {
-    if (!isReady || !user) return;
+    if (isInitializing || !user) return;
 
-    const interval = setInterval(() => {
-      if (pendingChanges.current) {
-        saveToCloud();
+    const pulse = setInterval(() => {
+      if (pendingSync.current) {
+        uploadToCloud();
       } else {
-        fetchFromCloud();
+        downloadFromCloud();
       }
-    }, 10000);
+    }, 8000);
 
-    return () => clearInterval(interval);
-  }, [isReady, user, fetchFromCloud, tasks, categories, logs, version]);
+    return () => clearInterval(pulse);
+  }, [isInitializing, user, downloadFromCloud, tasks, categories, logs]);
 
   /**
-   * Action Handlers
+   * Action Central
    */
-  const handleDataChange = (newTasks: Task[], newCats: string[], newLogs: ActivityLog[]) => {
-    setTasks(newTasks);
-    setCategories(newCats);
-    setLogs(newLogs);
-    pendingChanges.current = true;
+  const syncState = (t: Task[], c: string[], l: ActivityLog[]) => {
+    setTasks(t);
+    setCategories(c);
+    setLogs(l);
+    pendingSync.current = true;
     
-    // Attempt immediate save
-    saveToCloud({
-      tasks: newTasks,
-      categories: newCats,
-      logs: newLogs,
-      version: version + 1,
-      lastUpdatedBy: user?.nickname || 'User',
-      timestamp: Date.now()
-    });
+    // Immediate opportunistic save
+    uploadToCloud({ tasks: t, categories: c, logs: l });
   };
 
-  const createLog = (taskId: string, title: string, action: string, t: Task[], c: string[], l: ActivityLog[]) => {
+  const addLog = (taskId: string, title: string, action: string, t: Task[], c: string[], l: ActivityLog[]) => {
     const log: ActivityLog = {
       id: Math.random().toString(36).substr(2, 9),
       taskId,
       taskTitle: title,
-      nickname: user?.nickname || 'Member',
+      nickname: user?.nickname || 'User',
       action,
       timestamp: Date.now()
     };
-    handleDataChange(t, c, [log, ...l].slice(0, 50));
+    syncState(t, c, [log, ...l].slice(0, 50));
   };
 
   const updateTask = (id: string, updates: Partial<Task>) => {
     const task = tasks.find(t => t.id === id);
     if (!task) return;
     const newTasks = tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t);
-    createLog(id, task.title, updates.status ? `changed status to ${updates.status}` : "updated task details", newTasks, categories, logs);
+    addLog(id, task.title, updates.status ? `marked as ${updates.status}` : "updated task details", newTasks, categories, logs);
   };
 
   const deleteTask = (id: string) => {
     const task = tasks.find(t => t.id === id);
     if (!task || !confirm(`Delete "${task.title}"?`)) return;
     const newTasks = tasks.filter(t => t.id !== id);
-    createLog(id, task.title, "removed the task", newTasks, categories, logs);
+    addLog(id, task.title, "deleted the task", newTasks, categories, logs);
   };
 
   const onFormSubmit = (data: any) => {
@@ -217,7 +219,7 @@ export default function App() {
       ? tasks.map(t => t.id === editingTask!.id ? { ...t, ...data, updatedAt: Date.now() } : t)
       : [...tasks, { id: Math.random().toString(36).substr(2, 9), ...data, status: 'Pending', updatedAt: Date.now() }];
 
-    createLog(isEdit ? editingTask!.id : 'new', data.title, isEdit ? "edited details" : "created task", newTasks, freshCats, logs);
+    addLog(isEdit ? editingTask!.id : 'new', data.title, isEdit ? "updated task info" : "created new task", newTasks, freshCats, logs);
     setIsModalOpen(false);
     setEditingTask(undefined);
   };
@@ -226,46 +228,55 @@ export default function App() {
   const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
   const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
-  if (!isReady) return null;
-  if (!user) return <NicknameModal onJoin={(n) => { setUser({ nickname: n }); localStorage.setItem(USER_STORAGE_KEY, n); }} />;
+  if (isInitializing) return null;
+  if (!user) return <NicknameModal onJoin={(n) => { setUser({ nickname: n }); localStorage.setItem(STORAGE_KEYS.USER, n); }} />;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
-      <Header user={user} onLogout={() => { setUser(null); localStorage.removeItem(USER_STORAGE_KEY); }} />
+      <Header user={user} onLogout={() => { setUser(null); localStorage.removeItem(STORAGE_KEYS.USER); }} />
       
-      <main className="flex-grow container mx-auto px-4 py-6 flex flex-col lg:flex-row gap-6">
+      <main className="flex-grow container mx-auto px-4 py-4 lg:py-8 flex flex-col lg:flex-row gap-8">
         <div className="flex-grow space-y-6">
           <DashboardStats tasks={tasks} />
           
-          <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <div className="flex bg-slate-100 p-1 rounded-lg">
-                <button onClick={() => setViewMode('list')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${viewMode === 'list' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>LIST</button>
-                <button onClick={() => setViewMode('board')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${viewMode === 'board' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>BOARD</button>
+          <div className="bg-white p-2 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
+            <div className="flex items-center gap-3 w-full md:w-auto overflow-x-auto no-scrollbar">
+              <div className="flex bg-slate-100 p-1 rounded-lg shrink-0">
+                <button onClick={() => setViewMode('list')} className={`px-4 py-1.5 rounded-md text-xs font-black transition-all ${viewMode === 'list' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>LIST VIEW</button>
+                <button onClick={() => setViewMode('board')} className={`px-4 py-1.5 rounded-md text-xs font-black transition-all ${viewMode === 'board' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>BOARD VIEW</button>
               </div>
 
-              <div className="h-8 w-px bg-slate-200 hidden sm:block"></div>
+              <div className="h-6 w-px bg-slate-200 hidden md:block"></div>
 
-              <div className="flex items-center gap-3">
-                <div className={`w-2 h-2 rounded-full ${syncState === 'saving' || syncState === 'fetching' ? 'bg-amber-400 animate-pulse' : syncState === 'error' ? 'bg-red-500' : 'bg-green-500'}`}></div>
+              <div className="flex items-center gap-2 shrink-0">
+                <div className={`w-2.5 h-2.5 rounded-full ${syncStatus === 'saving' ? 'bg-amber-400 animate-pulse' : syncStatus === 'reconnecting' ? 'bg-red-400 animate-pulse' : 'bg-green-500 shadow-sm shadow-green-200'}`}></div>
                 <div className="flex flex-col">
-                  <span className="text-[10px] font-black uppercase text-slate-400 leading-none">
-                    {syncState === 'saving' ? 'Saving to Cloud...' : syncState === 'error' ? 'Sync Error (Retrying)' : 'Connected'}
+                  <span className="text-[10px] font-black uppercase text-slate-500 leading-none">
+                    {syncStatus === 'saving' ? 'Saving...' : syncStatus === 'reconnecting' ? 'Reconnecting...' : 'Drive Connected'}
                   </span>
-                  <span className="text-[10px] text-slate-500 font-mono">
-                    v{version} • Last Sync: {new Date(lastSync).toLocaleTimeString([], { hour12: false })}
+                  <span className="text-[9px] text-slate-400 font-mono tracking-tighter">
+                    V.{version} • {new Date(lastSyncTs).toLocaleTimeString([], { hour12: false })}
                   </span>
                 </div>
               </div>
             </div>
 
-            <button 
-              onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
-              className="w-full sm:w-auto px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M12 4v16m8-8H4"/></svg>
-              ADD PROJECT TASK
-            </button>
+            <div className="flex items-center gap-2 w-full md:w-auto">
+              <button 
+                onClick={() => downloadFromCloud(true)}
+                className="p-2.5 bg-slate-50 text-slate-500 hover:bg-slate-100 rounded-lg border border-slate-200 transition-all"
+                title="Force Refresh from Cloud"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="2.5" d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2"/></svg>
+              </button>
+              <button 
+                onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
+                className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M12 4v16m8-8H4"/></svg>
+                CREATE NEW TASK
+              </button>
+            </div>
           </div>
 
           {viewMode === 'list' ? (
@@ -280,22 +291,29 @@ export default function App() {
               onDeleteCategory={() => {}} 
             />
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-20 lg:pb-0">
               {categories.map(category => (
                 <div key={category} className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col h-[500px]">
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2">
-                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                      <span className="w-2 h-2 rounded-full bg-indigo-500 shadow-sm shadow-indigo-100"></span>
                       {category}
                     </h3>
-                    <span className="bg-slate-100 text-slate-500 text-[10px] px-2 py-0.5 rounded-full font-bold">
-                      {tasks.filter(t => t.category === category).length}
-                    </span>
+                    <button onClick={() => { setPreselectedCategory(category); setIsModalOpen(true); }} className="text-indigo-600 hover:bg-indigo-50 p-1.5 rounded-lg transition-all">
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="2.5" d="M12 4v16m8-8H4"/></svg>
+                    </button>
                   </div>
                   <div className="flex-grow overflow-y-auto custom-scrollbar space-y-3">
-                    {tasks.filter(t => t.category === category).map(task => (
-                      <TaskCard key={task.id} task={task} onUpdate={(u) => updateTask(task.id, u)} onDelete={() => deleteTask(task.id)} onEdit={() => { setEditingTask(task); setIsModalOpen(true); }} />
-                    ))}
+                    {tasks.filter(t => t.category === category).length > 0 ? (
+                      tasks.filter(t => t.category === category).map(task => (
+                        <TaskCard key={task.id} task={task} onUpdate={(u) => updateTask(task.id, u)} onDelete={() => deleteTask(task.id)} onEdit={() => { setEditingTask(task); setIsModalOpen(true); }} />
+                      ))
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-2 border-2 border-dashed border-slate-50 rounded-xl">
+                        <svg className="w-8 h-8 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4"/></svg>
+                        <span className="text-[10px] font-black uppercase tracking-tighter">No tasks yet</span>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -320,11 +338,20 @@ export default function App() {
         />
       )}
 
-      {/* Persistence Safety Banner */}
-      {syncState === 'error' && (
-        <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-4 bg-red-600 text-white px-4 py-2 rounded-lg shadow-2xl flex items-center gap-3 z-50 animate-bounce">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-          <span className="text-xs font-bold">Cloud Sync Offline. All changes saved locally.</span>
+      {/* Persistent Recovery Banner */}
+      {syncStatus === 'reconnecting' && (
+        <div className="fixed bottom-6 right-6 left-6 md:left-auto bg-slate-900 text-white px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-4 z-50 animate-in slide-in-from-bottom duration-300 border border-slate-700">
+          <div className="w-2 h-2 rounded-full bg-red-500 animate-ping"></div>
+          <div className="flex-grow">
+            <p className="text-xs font-black uppercase tracking-widest leading-none">Connecting to Drive...</p>
+            <p className="text-[10px] text-slate-400 mt-1">Changes are safely queued in your local browser storage.</p>
+          </div>
+          <button 
+            onClick={() => uploadToCloud()}
+            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all"
+          >
+            Retry Now
+          </button>
         </div>
       )}
     </div>
