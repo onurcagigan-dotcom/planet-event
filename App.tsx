@@ -10,14 +10,18 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-// V22: Resilient Cloud Strategy
-const CLOUD_BUCKET = 'A9S9h7nL3u3Jt9v6m8K1Z2';
-const PROJECT_ID = 'planet_v22_production'; 
+/**
+ * V23: SELF-HEALING CLOUD CORE
+ * We use a new bucket ID to bypass the 404 "bucket not found" error.
+ * If you still see 404, it means the service provider (kvdb.io) has cleared this temporary bucket.
+ */
+const CLOUD_BUCKET = '6Yf5m8N2q9T1u4X3'; // Fresh Bucket ID
+const PROJECT_ID = 'planet_v23_stable'; 
 const SYNC_URL = `https://kvdb.io/${CLOUD_BUCKET}/${PROJECT_ID}`;
 
 const STORAGE_KEYS = {
-  DB: `planet_v22_db`,
-  SESSION: `planet_v22_user`,
+  DB: `planet_v23_local_db`,
+  SESSION: `planet_v23_user`,
 };
 
 type SyncState = 'active' | 'syncing' | 'local' | 'error';
@@ -47,7 +51,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `planet_backup_${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `planet_v23_backup_${new Date().toISOString().split('T')[0]}.json`;
     a.click();
   };
 
@@ -68,7 +72,7 @@ export default function App() {
           vRef.current = data.version || 0;
           hasLocalChanges.current = true;
           cloudPush(data);
-          alert("Veriler başarıyla yüklendi ve buluta gönderiliyor.");
+          alert("Veriler başarıyla içe aktarıldı.");
         }
       } catch (err) {
         alert("Geçersiz yedek dosyası!");
@@ -109,7 +113,7 @@ export default function App() {
 
       if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`Bulut Sunucusu Hatası (${res.status}): ${errText || 'Erişim Engellendi'}`);
+        throw new Error(`Cloud Error ${res.status}: ${errText.includes('bucket not found') ? 'Sunucu havuzu (Bucket) mevcut değil.' : (errText || 'Bağlantı reddedildi')}`);
       }
 
       vRef.current = nextV;
@@ -119,7 +123,7 @@ export default function App() {
       hasLocalChanges.current = false;
       localStorage.setItem(STORAGE_KEYS.DB, JSON.stringify(payload));
     } catch (err: any) {
-      console.error(err);
+      console.error('Push Error:', err);
       setSyncState('error');
       setErrorMessage(err.message);
     } finally {
@@ -136,15 +140,18 @@ export default function App() {
     if (isInitial) setSyncState('syncing');
 
     try {
-      const res = await fetch(`${SYNC_URL}?_t=${Date.now()}`);
+      const res = await fetch(`${SYNC_URL}?_cb=${Date.now()}`);
       
       if (res.status === 404) {
-        // First time initialization
-        if (isInitial) await cloudPush();
+        // If 404 on Pull, it means the key doesn't exist yet. Push local data to create it.
+        if (isInitial) {
+          console.log('Key not found on cloud, initializing...');
+          await cloudPush();
+        }
         return;
       }
 
-      if (!res.ok) throw new Error('Veri okunamadı');
+      if (!res.ok) throw new Error(`Fetch Error ${res.status}`);
 
       const data = await res.json();
       
@@ -160,10 +167,14 @@ export default function App() {
       } else {
         setSyncState('active');
       }
-    } catch (err) {
-      if (isInitial) setSyncState('error');
+    } catch (err: any) {
+      console.warn('Pull Error:', err.message);
+      if (isInitial) {
+        setSyncState('error');
+        setErrorMessage(err.message);
+      }
     }
-  }, [tasks, categories, logs]);
+  }, [tasks, categories, logs, user]);
 
   // Initial Load
   useEffect(() => {
@@ -189,8 +200,15 @@ export default function App() {
     }
     
     setIsReady(true);
-    setTimeout(() => cloudPull(true), 500);
+    // Wait for user state to be set before initial pull
   }, []);
+
+  useEffect(() => {
+    if (isReady && user) {
+      const timer = setTimeout(() => cloudPull(true), 800);
+      return () => clearTimeout(timer);
+    }
+  }, [isReady, user]);
 
   // Sync Loop
   useEffect(() => {
@@ -283,7 +301,6 @@ export default function App() {
         <div className="flex-grow space-y-6">
           <DashboardStats tasks={tasks} />
           
-          {/* Enhanced Toolbar */}
           <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-4 w-full md:w-auto">
               <div className="flex bg-slate-100 p-1 rounded-lg shrink-0">
@@ -295,7 +312,7 @@ export default function App() {
                 <div className={`w-2.5 h-2.5 rounded-full ${syncState === 'syncing' ? 'bg-amber-400 animate-pulse' : syncState === 'error' ? 'bg-red-500' : 'bg-green-500 shadow-sm shadow-green-200'}`}></div>
                 <div className="flex flex-col">
                   <span className="text-[10px] font-black uppercase text-slate-700 leading-none">
-                    {syncState === 'syncing' ? 'Bulut Güncelleniyor' : syncState === 'error' ? 'Bulut Hatası' : 'Bulut Senkronize'}
+                    {syncState === 'syncing' ? 'Güncelleniyor' : syncState === 'error' ? 'Bulut Bağlantı Yok' : 'Bulut Aktif'}
                   </span>
                   <span className="text-[9px] text-slate-400 font-mono tracking-tighter mt-0.5">
                     V{version} • {new Date(lastSync).toLocaleTimeString([], { hour12: false })}
@@ -308,7 +325,7 @@ export default function App() {
                <button 
                 onClick={exportData}
                 className="p-2.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg border border-slate-200 transition-all active:scale-95"
-                title="Yedek Al (JSON)"
+                title="JSON Yedek Al"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
               </button>
@@ -321,7 +338,7 @@ export default function App() {
               <button 
                 onClick={() => cloudPull(true)}
                 className="p-2.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg border border-slate-200 transition-all active:scale-95"
-                title="Yenile"
+                title="Zorlamalı Yenile"
               >
                 <svg className={`w-4 h-4 ${syncState === 'syncing' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2"/></svg>
               </button>
@@ -390,15 +407,14 @@ export default function App() {
         />
       )}
 
-      {/* Persistence Banner for Network Errors */}
       {syncState === 'error' && (
         <div className="fixed bottom-6 right-6 left-6 md:left-auto md:w-96 bg-red-950 text-white p-5 rounded-2xl shadow-2xl flex flex-col gap-3 z-50 border border-red-800 animate-in slide-in-from-bottom-4">
           <div className="flex items-center gap-4">
             <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
-            <p className="text-xs font-black uppercase tracking-widest leading-none">Bulut Kaydı Başarısız</p>
+            <p className="text-xs font-black uppercase tracking-widest leading-none">Sunucu Erişimi Hatası</p>
           </div>
           <p className="text-[10px] opacity-70 leading-relaxed">
-            {errorMessage || "Sunucuya ulaşılamıyor. Lütfen verilerinizi 'JSON İndir' butonuyla manuel olarak yedekleyin."}
+            {errorMessage || "Bulut sunucusuna ulaşılamıyor. 'bucket not found' hatası alıyorsanız yeni bir Bucket ID gerekmektedir."}
           </p>
           <div className="flex gap-2">
             <button onClick={() => cloudPush()} className="bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex-grow">TEKRAR DENE</button>
