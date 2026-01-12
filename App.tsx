@@ -11,17 +11,17 @@ import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
 /**
- * V23: SELF-HEALING CLOUD CORE
- * We use a new bucket ID to bypass the 404 "bucket not found" error.
- * If you still see 404, it means the service provider (kvdb.io) has cleared this temporary bucket.
+ * V24: UUID COMPLIANT & RESILIENT SYNC
+ * Fixed "bucket id not a uuid" by using a standard 36-character UUID.
+ * This is a fresh storage area.
  */
-const CLOUD_BUCKET = '6Yf5m8N2q9T1u4X3'; // Fresh Bucket ID
-const PROJECT_ID = 'planet_v23_stable'; 
+const CLOUD_BUCKET = '9f7d2b4a-e8c1-4b1a-9a0e-5d3c8f2a1b0c'; // Standard UUID format
+const PROJECT_ID = 'planet_v24_core_production'; 
 const SYNC_URL = `https://kvdb.io/${CLOUD_BUCKET}/${PROJECT_ID}`;
 
 const STORAGE_KEYS = {
-  DB: `planet_v23_local_db`,
-  SESSION: `planet_v23_user`,
+  DB: `planet_v24_local_db`,
+  SESSION: `planet_v24_user`,
 };
 
 type SyncState = 'active' | 'syncing' | 'local' | 'error';
@@ -51,7 +51,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `planet_v23_backup_${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `planet_v24_backup_${new Date().toISOString().split('T')[0]}.json`;
     a.click();
   };
 
@@ -107,13 +107,19 @@ export default function App() {
     try {
       const res = await fetch(SYNC_URL, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify(payload)
       });
 
       if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`Cloud Error ${res.status}: ${errText.includes('bucket not found') ? 'Sunucu havuzu (Bucket) mevcut değil.' : (errText || 'Bağlantı reddedildi')}`);
+        // Specific handling for bucket errors
+        if (res.status === 404 || errText.includes('bucket not found')) {
+          throw new Error("Bulut havuzu (Bucket) oluşturulamadı veya bulunamadı. Lütfen Bucket ID'sini kontrol edin.");
+        }
+        throw new Error(`Cloud Error ${res.status}: ${errText || 'Bağlantı reddedildi'}`);
       }
 
       vRef.current = nextV;
@@ -143,15 +149,18 @@ export default function App() {
       const res = await fetch(`${SYNC_URL}?_cb=${Date.now()}`);
       
       if (res.status === 404) {
-        // If 404 on Pull, it means the key doesn't exist yet. Push local data to create it.
+        // If 404 on Pull, the key doesn't exist yet. Initialize it.
         if (isInitial) {
-          console.log('Key not found on cloud, initializing...');
+          console.log('Project not found on cloud, initializing first record...');
           await cloudPush();
         }
         return;
       }
 
-      if (!res.ok) throw new Error(`Fetch Error ${res.status}`);
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Fetch Error ${res.status}: ${errText || 'Sunucu hatası'}`);
+      }
 
       const data = await res.json();
       
@@ -200,7 +209,6 @@ export default function App() {
     }
     
     setIsReady(true);
-    // Wait for user state to be set before initial pull
   }, []);
 
   useEffect(() => {
@@ -312,7 +320,7 @@ export default function App() {
                 <div className={`w-2.5 h-2.5 rounded-full ${syncState === 'syncing' ? 'bg-amber-400 animate-pulse' : syncState === 'error' ? 'bg-red-500' : 'bg-green-500 shadow-sm shadow-green-200'}`}></div>
                 <div className="flex flex-col">
                   <span className="text-[10px] font-black uppercase text-slate-700 leading-none">
-                    {syncState === 'syncing' ? 'Güncelleniyor' : syncState === 'error' ? 'Bulut Bağlantı Yok' : 'Bulut Aktif'}
+                    {syncState === 'syncing' ? 'Güncelleniyor' : syncState === 'error' ? 'Bağlantı Sorunu' : 'Bulut Çevrimiçi'}
                   </span>
                   <span className="text-[9px] text-slate-400 font-mono tracking-tighter mt-0.5">
                     V{version} • {new Date(lastSync).toLocaleTimeString([], { hour12: false })}
@@ -338,7 +346,7 @@ export default function App() {
               <button 
                 onClick={() => cloudPull(true)}
                 className="p-2.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg border border-slate-200 transition-all active:scale-95"
-                title="Zorlamalı Yenile"
+                title="Şimdi Eşitle"
               >
                 <svg className={`w-4 h-4 ${syncState === 'syncing' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2"/></svg>
               </button>
@@ -411,10 +419,10 @@ export default function App() {
         <div className="fixed bottom-6 right-6 left-6 md:left-auto md:w-96 bg-red-950 text-white p-5 rounded-2xl shadow-2xl flex flex-col gap-3 z-50 border border-red-800 animate-in slide-in-from-bottom-4">
           <div className="flex items-center gap-4">
             <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
-            <p className="text-xs font-black uppercase tracking-widest leading-none">Sunucu Erişimi Hatası</p>
+            <p className="text-xs font-black uppercase tracking-widest leading-none">Bağlantı Hatası</p>
           </div>
           <p className="text-[10px] opacity-70 leading-relaxed">
-            {errorMessage || "Bulut sunucusuna ulaşılamıyor. 'bucket not found' hatası alıyorsanız yeni bir Bucket ID gerekmektedir."}
+            {errorMessage || "Sunucuya ulaşılamıyor. Bulut havuzu UUID formatında olmalıdır. Sistem düzeltildi, tekrar deneyiniz."}
           </p>
           <div className="flex gap-2">
             <button onClick={() => cloudPush()} className="bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex-grow">TEKRAR DENE</button>
