@@ -147,24 +147,11 @@ export const TaskListView: React.FC<TaskListViewProps> = ({
                       </td>
                     </tr>
                   ))}
-                  {categoryTasks.length === 0 && !searchTerm && (
-                    <tr className="bg-slate-50/20">
-                      <td colSpan={6} className="px-4 py-4 text-center text-[11px] text-slate-400 font-medium italic">
-                        Empty group. <button onClick={() => onAddTask(category)} className="text-indigo-600 font-bold hover:underline ml-1">+ CREATE FIRST TASK</button>
-                      </td>
-                    </tr>
-                  )}
                 </React.Fragment>
               );
             })}
           </tbody>
         </table>
-        {filteredTasks.length === 0 && searchTerm && (
-          <div className="p-20 text-center text-slate-400 flex flex-col items-center gap-2">
-            <svg className="w-10 h-10 text-slate-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-            <p className="font-medium">No matches found for "{searchTerm}"</p>
-          </div>
-        )}
       </div>
     </div>
   );

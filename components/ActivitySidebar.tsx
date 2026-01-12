@@ -14,23 +14,23 @@ export const ActivitySidebar: React.FC<ActivitySidebarProps> = ({ logs }) => {
           <svg className="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
           Activity Stream
         </h3>
-        <span className="text-[10px] text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full">LIVE</span>
+        <span className="text-[10px] text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full">HISTORY</span>
       </div>
 
       <div className="flex-grow overflow-y-auto custom-scrollbar p-4 space-y-4">
         {logs.length === 0 ? (
-          <div className="text-center py-20 text-slate-400 text-sm">No activity yet.</div>
+          <div className="text-center py-20 text-slate-400 text-sm font-medium italic">No activity logs found.</div>
         ) : (
           logs.map(log => (
             <div key={log.id} className="relative pl-6 pb-4 border-l border-slate-100 last:pb-0">
-              <div className="absolute left-[-5px] top-0 w-2.5 h-2.5 rounded-full bg-slate-200 border-2 border-white"></div>
+              <div className="absolute left-[-5px] top-0 w-2.5 h-2.5 rounded-full bg-indigo-200 border-2 border-white"></div>
               <div className="flex flex-col">
                 <div className="flex justify-between items-start mb-0.5">
                   <span className="text-xs font-bold text-indigo-600">{log.nickname}</span>
-                  <span className="text-[10px] text-slate-400">{new Date(log.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>
+                  <span className="text-[10px] text-slate-400 font-mono">{new Date(log.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>
                 </div>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  <span className="font-medium text-slate-800">"{log.taskTitle}"</span> {log.action}.
+                  <span className="font-bold text-slate-800">"{log.taskTitle}"</span> {log.action}.
                 </p>
               </div>
             </div>
