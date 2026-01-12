@@ -11,19 +11,27 @@ import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
 /**
- * V25: UNIVERSAL IDENTITY & CLOUD RECOVERY
- * We are using a fresh, strictly formatted v4 UUID as required by kvdb.io.
+ * V26: TITANIUM SYNC & PRIVATE BUCKET ENGINE
+ * Strictly formatted v4 UUID to satisfy kvdb.io requirements.
  */
-const DEFAULT_BUCKET = 'e4b2d9f1-7a3c-482e-9c1d-6b5f4a3e2d1c';
-const DEFAULT_PROJECT = 'planet_v25_final';
+const GLOBAL_FALLBACK_BUCKET = 'b7d3a2e1-c5f4-4e9a-8d6b-0f1e2d3c4b5a';
+const PROJECT_KEY = 'planet_titanium_v26';
 
 const STORAGE_KEYS = {
-  DB: `planet_v25_local_db`,
-  SESSION: `planet_v25_user`,
-  BUCKET_OVERRIDE: `planet_v25_bucket_id`
+  DB: `planet_v26_local_db`,
+  SESSION: `planet_v26_user`,
+  BUCKET_ID: `planet_v26_active_bucket`
 };
 
 type SyncState = 'active' | 'syncing' | 'local' | 'error';
+
+// Utility to generate a valid v4 UUID
+const generateUUID = () => {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+};
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -38,23 +46,24 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   
   // Dynamic Bucket Management
-  const [activeBucket, setActiveBucket] = useState(localStorage.getItem(STORAGE_KEYS.BUCKET_OVERRIDE) || DEFAULT_BUCKET);
+  const [bucketId, setBucketId] = useState(() => {
+    return localStorage.getItem(STORAGE_KEYS.BUCKET_ID) || GLOBAL_FALLBACK_BUCKET;
+  });
 
   const vRef = useRef(0);
   const syncLock = useRef(false);
   const hasLocalChanges = useRef(false);
 
-  const getSyncUrl = () => `https://kvdb.io/${activeBucket}/${DEFAULT_PROJECT}`;
+  const getSyncUrl = () => `https://kvdb.io/${bucketId}/${PROJECT_KEY}`;
 
   /**
-   * RECOVERY: Change Bucket ID Manually
+   * SELF-HEALING: Regenerate a private bucket
    */
-  const handleBucketOverride = () => {
-    const newId = prompt("Yeni bir Bucket ID (UUID) girin veya varsayılana dönmek için boş bırakın:", activeBucket);
-    if (newId !== null) {
-      const idToSet = newId.trim() || DEFAULT_BUCKET;
-      setActiveBucket(idToSet);
-      localStorage.setItem(STORAGE_KEYS.BUCKET_OVERRIDE, idToSet);
+  const handleRegenerateBucket = () => {
+    if (confirm("Mevcut bulut alanı geçersiz. Sizin için tamamen yeni ve özel bir bulut kimliği oluşturulsun mu? (Bu işlemden sonra diğer kullanıcılarla tekrar eşleşmek için yeni ID'yi paylaşmanız gerekecektir.)")) {
+      const newUUID = generateUUID();
+      localStorage.setItem(STORAGE_KEYS.BUCKET_ID, newUUID);
+      setBucketId(newUUID);
       window.location.reload();
     }
   };
@@ -91,7 +100,10 @@ export default function App() {
 
       if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`Bulut Hatası (${res.status}): ${errText || 'Erişim reddedildi'}`);
+        if (res.status === 404 || errText.toLowerCase().includes('invalid')) {
+          throw new Error("BULUT_ID_GECERSIZ");
+        }
+        throw new Error(`Bağlantı Hatası (${res.status})`);
       }
 
       vRef.current = nextV;
@@ -101,9 +113,8 @@ export default function App() {
       hasLocalChanges.current = false;
       localStorage.setItem(STORAGE_KEYS.DB, JSON.stringify(payload));
     } catch (err: any) {
-      console.error('Push Error:', err);
       setSyncState('error');
-      setErrorMessage(err.message);
+      setErrorMessage(err.message === "BULUT_ID_GECERSIZ" ? "Bulut Sunucusu ID formatını reddetti. Yeni bir ID üretilmesi gerekiyor." : err.message);
     } finally {
       syncLock.current = false;
     }
@@ -114,25 +125,22 @@ export default function App() {
    */
   const cloudPull = useCallback(async (isInitial = false) => {
     if (syncLock.current || !navigator.onLine || hasLocalChanges.current) return;
-
     if (isInitial) setSyncState('syncing');
 
     try {
       const res = await fetch(`${getSyncUrl()}?_v=${Date.now()}`);
       
       if (res.status === 404) {
-        // Project not initialized on cloud yet
+        const errText = await res.text();
+        if (errText.toLowerCase().includes('invalid')) throw new Error("BULUT_ID_GECERSIZ");
+        // Key missing but bucket okay -> init
         if (isInitial) await cloudPush();
         return;
       }
 
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Veri Çekme Hatası (${res.status}): ${errText}`);
-      }
+      if (!res.ok) throw new Error(`Sunucu Hatası (${res.status})`);
 
       const data = await res.json();
-      
       if (data && data.version > vRef.current) {
         setTasks(data.tasks || []);
         setCategories(data.categories || DEFAULT_CATEGORIES);
@@ -148,12 +156,12 @@ export default function App() {
     } catch (err: any) {
       if (isInitial) {
         setSyncState('error');
-        setErrorMessage(err.message);
+        setErrorMessage(err.message === "BULUT_ID_GECERSIZ" ? "Bulut Sunucusu ID formatını reddetti." : err.message);
       }
     }
-  }, [tasks, categories, logs, user, activeBucket]);
+  }, [tasks, categories, logs, user, bucketId]);
 
-  // Initial Boot
+  // Initial Load
   useEffect(() => {
     const savedUser = localStorage.getItem(STORAGE_KEYS.SESSION);
     if (savedUser) setUser({ nickname: savedUser });
@@ -174,7 +182,6 @@ export default function App() {
       setTasks(INITIAL_TASKS);
       setCategories(DEFAULT_CATEGORIES);
     }
-    
     setIsReady(true);
   }, []);
 
@@ -183,9 +190,9 @@ export default function App() {
       const timer = setTimeout(() => cloudPull(true), 1000);
       return () => clearTimeout(timer);
     }
-  }, [isReady, user, activeBucket]);
+  }, [isReady, user, bucketId]);
 
-  // Sync Interval
+  // Main Sync Loop
   useEffect(() => {
     if (!isReady || !user) return;
     const interval = setInterval(() => {
@@ -194,12 +201,12 @@ export default function App() {
       } else {
         cloudPull();
       }
-    }, 15000);
+    }, 12000);
     return () => clearInterval(interval);
   }, [isReady, user, cloudPull, tasks, categories, logs]);
 
   /**
-   * Handlers
+   * State Handlers
    */
   const applyChange = (t: Task[], c: string[], l: ActivityLog[]) => {
     setTasks(t);
@@ -279,35 +286,35 @@ export default function App() {
           <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-4 w-full md:w-auto">
               <div className="flex bg-slate-100 p-1 rounded-lg shrink-0">
-                <button onClick={() => setViewMode('list')} className={`px-4 py-1.5 rounded-md text-[10px] font-black transition-all ${viewMode === 'list' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'}`}>LİSTE</button>
-                <button onClick={() => setViewMode('board')} className={`px-4 py-1.5 rounded-md text-[10px] font-black transition-all ${viewMode === 'board' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'}`}>PANEL</button>
+                <button onClick={() => setViewMode('list')} className={`px-4 py-1.5 rounded-md text-[10px] font-black transition-all ${viewMode === 'list' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>LİSTE</button>
+                <button onClick={() => setViewMode('board')} className={`px-4 py-1.5 rounded-md text-[10px] font-black transition-all ${viewMode === 'board' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>PANEL</button>
               </div>
 
               <div className="flex items-center gap-2.5 px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-100 min-w-[160px]">
-                <div className={`w-2.5 h-2.5 rounded-full ${syncState === 'syncing' ? 'bg-amber-400 animate-pulse' : syncState === 'error' ? 'bg-red-500' : 'bg-green-500 shadow-sm shadow-green-200'}`}></div>
+                <div className={`w-2 h-2 rounded-full ${syncState === 'syncing' ? 'bg-amber-400 animate-pulse' : syncState === 'error' ? 'bg-red-500' : 'bg-green-500 shadow-sm shadow-green-200'}`}></div>
                 <div className="flex flex-col">
-                  <span className="text-[10px] font-black uppercase text-slate-700 leading-none">
-                    {syncState === 'syncing' ? 'Eşitleniyor' : syncState === 'error' ? 'Bağlantı Sorunu' : 'Bulut Çevrimiçi'}
+                  <span className="text-[10px] font-black uppercase text-slate-700 leading-none tracking-tighter">
+                    {syncState === 'syncing' ? 'Eşitleniyor' : syncState === 'error' ? 'Bağlantı Yok' : 'Titanium Aktif'}
                   </span>
-                  <span className="text-[9px] text-slate-400 font-mono tracking-tighter mt-0.5">
-                    V{version} • {new Date(lastSync).toLocaleTimeString([], { hour12: false })}
+                  <span className="text-[9px] text-slate-400 font-mono tracking-tighter mt-1">
+                    V{version} • {new Date(lastSync).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </div>
               </div>
             </div>
 
             <div className="flex items-center gap-2 w-full md:w-auto">
-              <button 
+               <button 
                 onClick={() => cloudPull(true)}
                 className="p-2.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg border border-slate-200 transition-all active:scale-95"
-                title="Şimdi Güncelle"
+                title="Şimdi Yenile"
               >
                 <svg className={`w-4 h-4 ${syncState === 'syncing' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2"/></svg>
               </button>
               
               <button 
                 onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }}
-                className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2"
+                className="flex-grow md:flex-none px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-black shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2 tracking-widest"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeWidth="3" d="M12 4v16m8-8H4"/></svg>
                 YENİ GÖREV EKLE
@@ -369,19 +376,21 @@ export default function App() {
         />
       )}
 
-      {/* Persistence / Error Banner */}
+      {/* Titanium Error/Config Banner */}
       {syncState === 'error' && (
-        <div className="fixed bottom-6 right-6 left-6 md:left-auto md:w-96 bg-slate-900 text-white p-5 rounded-2xl shadow-2xl flex flex-col gap-3 z-50 border border-slate-700 animate-in slide-in-from-bottom-4">
+        <div className="fixed bottom-6 right-6 left-6 md:left-auto md:w-96 bg-slate-900 text-white p-5 rounded-2xl shadow-2xl flex flex-col gap-3 z-50 border border-slate-700 animate-in slide-in-from-bottom-4 ring-4 ring-indigo-500/10">
           <div className="flex items-center gap-4">
             <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
-            <p className="text-xs font-black uppercase tracking-widest leading-none">Bulut Erişimi Kısıtlı</p>
+            <p className="text-xs font-black uppercase tracking-widest leading-none">Bağlantı Kritik Hatası</p>
           </div>
-          <p className="text-[10px] opacity-70 leading-relaxed">
-            {errorMessage || "KVDB sunucusu UUID hatası veriyor olabilir. Sistem otomatik düzeltildi. Sorun sürerse Bucket ID'yi manuel güncelleyin."}
+          <p className="text-[10px] opacity-70 leading-relaxed font-medium">
+            {errorMessage?.includes('BULUT_ID_GECERSIZ') 
+              ? "Sunucu bu havuz kimliğini reddetti. KVDB kuralları gereği kimlik v4 UUID formatında olmalıdır." 
+              : (errorMessage || "Sunucuya ulaşılamıyor. İnternet bağlantınızı kontrol edin.")}
           </p>
-          <div className="flex gap-2">
-            <button onClick={() => cloudPush()} className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex-grow">TEKRAR DENE</button>
-            <button onClick={handleBucketOverride} className="bg-white/10 hover:bg-white/20 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase transition-all">ID DEĞİŞTİR</button>
+          <div className="flex gap-2 mt-1">
+            <button onClick={() => cloudPush()} className="bg-white/10 hover:bg-white/20 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase transition-all flex-grow border border-white/5">TEKRAR DENE</button>
+            <button onClick={handleRegenerateBucket} className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all shadow-lg shadow-indigo-900/50">YENİ ID ÜRET</button>
           </div>
         </div>
       )}
