@@ -10,9 +10,10 @@ import { DashboardStats } from './components/DashboardStats';
 import { TaskListView } from './components/TaskListView';
 import { TaskFormModal } from './components/TaskFormModal';
 
-// V12: Optimized high-availability shared bucket
-const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_track_v12_stable';
-const STORAGE_KEY_USER = 'planet_user_v12';
+// V13: Ultra-stable shared bucket
+const SYNC_URL = 'https://kvdb.io/A9S9h7nL3u3Jt9v6m8K1Z2/planet_v13_stable';
+const STORAGE_KEY_USER = 'planet_user_v13';
+const STORAGE_KEY_DATA = 'planet_local_cache_v13';
 
 type ViewMode = 'board' | 'list';
 type SyncStatus = 'synced' | 'syncing' | 'error' | 'checking' | 'offline';
@@ -26,193 +27,214 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
   const [lastSyncTime, setLastSyncTime] = useState<number>(Date.now());
   const [isInitializing, setIsInitializing] = useState(true);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
-  // Synchronization Control
-  const lastUpdateRef = useRef<number>(0);
-  const isSyncBusy = useRef<boolean>(false);
-  const consecutiveErrors = useRef<number>(0);
+  // Sync Control Refs
+  const lastUpdateTs = useRef<number>(0);
+  const isSyncing = useRef<boolean>(false);
+  const backoffCount = useRef<number>(0);
   
-  // UI Interaction States
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
   const [preselectedCategory, setPreselectedCategory] = useState<string | undefined>(undefined);
 
-  /**
-   * PUSH: Broadcast local state to the cloud
-   */
-  const broadcastChanges = async (t: Task[], c: string[], l: ActivityLog[]) => {
-    // Prevent overlapping push requests
-    if (isSyncBusy.current) return;
-    isSyncBusy.current = true;
-    setSyncStatus('syncing');
+  // Handle Online/Offline status
+  useEffect(() => {
+    const handleStatus = () => setIsOnline(navigator.onLine);
+    window.addEventListener('online', handleStatus);
+    window.addEventListener('offline', handleStatus);
+    return () => {
+      window.removeEventListener('online', handleStatus);
+      window.removeEventListener('offline', handleStatus);
+    };
+  }, []);
 
+  /**
+   * PUSH: Send data to cloud with local fallback
+   */
+  const broadcast = async (t: Task[], c: string[], l: ActivityLog[]) => {
+    // 1. Always save to local storage first (Safety Net)
     const timestamp = Date.now();
     const payload = { tasks: t, categories: c, logs: l, lastUpdate: timestamp };
+    localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(payload));
+    lastUpdateTs.current = timestamp;
+
+    if (!navigator.onLine || isSyncing.current) return;
+    
+    isSyncing.current = true;
+    setSyncStatus('syncing');
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      const tid = setTimeout(() => controller.abort(), 12000);
 
-      const response = await fetch(SYNC_URL, {
+      const res = await fetch(SYNC_URL, {
         method: 'PUT',
+        mode: 'cors',
         body: JSON.stringify(payload),
         signal: controller.signal
       });
 
-      clearTimeout(timeoutId);
+      clearTimeout(tid);
 
-      if (!response.ok) throw new Error('Network refused the update');
+      if (!res.ok) throw new Error(`Cloud rejected: ${res.status}`);
 
-      lastUpdateRef.current = timestamp;
-      setLastSyncTime(Date.now());
       setSyncStatus('synced');
-      consecutiveErrors.current = 0;
+      setLastSyncTime(Date.now());
+      backoffCount.current = 0;
     } catch (err) {
-      console.error('Cloud Update Failed:', err);
+      console.warn('Sync failed, will retry later:', err);
       setSyncStatus('error');
-      consecutiveErrors.current++;
+      backoffCount.current++;
     } finally {
-      // GUARANTEE: The lock is always released
-      isSyncBusy.current = false;
+      isSyncing.current = false;
     }
   };
 
   /**
-   * PULL: Fetch latest data from the cloud
+   * PULL: Get latest from cloud
    */
-  const pullLatest = useCallback(async (isManual = false) => {
-    if (isSyncBusy.current) return;
+  const pull = useCallback(async (isManual = false) => {
+    if (isSyncing.current || !navigator.onLine) return;
     
     setSyncStatus(isManual ? 'syncing' : 'checking');
     try {
-      // cache_bust ensures we don't get a stale browser-cached response
-      const response = await fetch(`${SYNC_URL}?cb=${Date.now()}`, { cache: 'no-store' });
+      const res = await fetch(`${SYNC_URL}?cb=${Date.now()}`, { cache: 'no-store' });
       
-      if (response.ok) {
-        const text = await response.text();
-        
-        // Handle empty bucket
+      if (res.ok) {
+        const text = await res.text();
         if (!text || text.trim() === "") {
-          if (isManual) await broadcastChanges(tasks, categories, logs);
+          if (isManual) await broadcast(tasks, categories, logs);
           setSyncStatus('synced');
           return;
         }
 
         const data = JSON.parse(text);
-        
-        // Cloud is newer: Apply updates to local state
-        if (data.lastUpdate > lastUpdateRef.current) {
+        if (data.lastUpdate > lastUpdateTs.current) {
           setTasks(data.tasks || []);
           setCategories(data.categories || DEFAULT_CATEGORIES);
           setLogs(data.logs || []);
-          lastUpdateRef.current = data.lastUpdate;
+          lastUpdateTs.current = data.lastUpdate;
           setLastSyncTime(Date.now());
+          // Update local cache
+          localStorage.setItem(STORAGE_KEY_DATA, text);
         }
         setSyncStatus('synced');
-        consecutiveErrors.current = 0;
+        backoffCount.current = 0;
       } else {
         setSyncStatus('error');
       }
     } catch (err) {
-      console.error('Cloud Fetch Failed:', err);
+      console.warn('Pull failed:', err);
       setSyncStatus('error');
-      consecutiveErrors.current++;
+      backoffCount.current++;
     } finally {
-      // Small delay for checking status to avoid flashing UI
       if (!isManual) {
-        setTimeout(() => {
-          if (!isSyncBusy.current) setSyncStatus(prev => (prev === 'checking') ? 'synced' : prev);
-        }, 1000);
+        setTimeout(() => setSyncStatus(prev => prev === 'checking' ? 'synced' : prev), 1000);
       }
     }
   }, [tasks, categories, logs]);
 
-  // Bootup
+  // Initial Load & Hydration
   useEffect(() => {
+    // 1. Get User
     const savedUser = localStorage.getItem(STORAGE_KEY_USER);
     if (savedUser) setUser({ nickname: savedUser });
 
-    setTasks(INITIAL_TASKS);
-    setCategories(DEFAULT_CATEGORIES);
+    // 2. Hydrate from Local Cache immediately
+    const localData = localStorage.getItem(STORAGE_KEY_DATA);
+    if (localData) {
+      try {
+        const parsed = JSON.parse(localData);
+        setTasks(parsed.tasks);
+        setCategories(parsed.categories);
+        setLogs(parsed.logs);
+        lastUpdateTs.current = parsed.lastUpdate || 0;
+      } catch (e) {
+        setTasks(INITIAL_TASKS);
+        setCategories(DEFAULT_CATEGORIES);
+      }
+    } else {
+      setTasks(INITIAL_TASKS);
+      setCategories(DEFAULT_CATEGORIES);
+    }
+
     setIsInitializing(false);
     
-    // Attempt first sync
-    const initTimer = setTimeout(() => pullLatest(true), 1000);
-    return () => clearTimeout(initTimer);
+    // 3. Initial Cloud Sync
+    const timer = setTimeout(() => pull(true), 800);
+    return () => clearTimeout(timer);
   }, []);
 
-  // Intelligent Sequential Polling (Heartbeat)
+  // Smarter Sequential Heartbeat
   useEffect(() => {
-    if (isInitializing || !user) return;
+    if (isInitializing || !user || isModalOpen) return;
 
     let timeoutId: number;
     const poll = async () => {
-      // Only pull if we aren't in the middle of a modal edit (avoids UI jumps)
-      if (!isModalOpen && syncStatus !== 'syncing') {
-        await pullLatest(false);
+      if (navigator.onLine && syncStatus !== 'syncing') {
+        await pull(false);
       }
-      // Schedule next poll ONLY after this one finishes
-      timeoutId = window.setTimeout(poll, consecutiveErrors.current > 3 ? 15000 : 7000);
+      
+      // Dynamic backoff logic to prevent "Retry Loop"
+      const baseDelay = 8000;
+      const errorDelay = Math.min(backoffCount.current * 10000, 40000);
+      timeoutId = window.setTimeout(poll, baseDelay + errorDelay);
     };
 
     poll();
     return () => clearTimeout(timeoutId);
-  }, [isInitializing, user, isModalOpen, pullLatest, syncStatus]);
+  }, [isInitializing, user, isModalOpen, pull, syncStatus]);
 
   /**
-   * CENTRAL STATE UPDATE & BROADCAST
+   * UI Action Handler
    */
-  const handleDataChange = (t: Task[], c: string[], l: ActivityLog[]) => {
-    // Optimistic Update: Update UI instantly
+  const handleUpdate = (t: Task[], c: string[], l: ActivityLog[]) => {
     setTasks(t);
     setCategories(c);
     setLogs(l);
-    
-    // Broadcast to team
-    broadcastChanges(t, c, l);
+    broadcast(t, c, l);
   };
 
-  const logAction = (taskId: string, title: string, action: string, t: Task[], c: string[], l: ActivityLog[]) => {
+  const addLog = (taskId: string, title: string, action: string, t: Task[], c: string[], l: ActivityLog[]) => {
     const newLog: ActivityLog = {
       id: Math.random().toString(36).substr(2, 9),
       taskId,
       taskTitle: title,
-      nickname: user?.nickname || 'Guest',
+      nickname: user?.nickname || 'Team',
       action,
       timestamp: Date.now()
     };
     const updatedLogs = [newLog, ...l].slice(0, 50);
-    handleDataChange(t, c, updatedLogs);
+    handleUpdate(t, c, updatedLogs);
   };
 
-  const updateTask = (id: string, updates: Partial<Task>) => {
+  const onUpdateTask = (id: string, updates: Partial<Task>) => {
     const task = tasks.find(t => t.id === id);
     if (!task) return;
     
-    let actionLabel = "updated the task";
-    if (updates.status && updates.status !== task.status) actionLabel = `marked as ${updates.status}`;
-    else if (updates.assignee !== undefined) actionLabel = `reassigned to ${updates.assignee || 'None'}`;
+    let msg = "updated details";
+    if (updates.status && updates.status !== task.status) msg = `moved to ${updates.status}`;
+    else if (updates.assignee !== undefined) msg = `assigned to ${updates.assignee || 'Unassigned'}`;
     
     const newTasks = tasks.map(t => t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t);
-    logAction(id, task.title, actionLabel, newTasks, categories, logs);
+    addLog(id, task.title, msg, newTasks, categories, logs);
   };
 
-  const deleteTask = (id: string) => {
+  const onDeleteTask = (id: string) => {
     const task = tasks.find(t => t.id === id);
     if (!task || !confirm(`Delete "${task.title}"?`)) return;
     const newTasks = tasks.filter(t => t.id !== id);
-    logAction(id, task.title, "removed the task", newTasks, categories, logs);
+    addLog(id, task.title, "removed the task", newTasks, categories, logs);
   };
 
   const onFormSubmit = (data: { title: string, category: string, deadline: string | null, notes: string, assignee: string | null }) => {
-    let updatedCats = [...categories];
-    if (!updatedCats.includes(data.category)) {
-      updatedCats = [...updatedCats, data.category];
-    }
+    let freshCats = [...categories];
+    if (!freshCats.includes(data.category)) freshCats = [...freshCats, data.category];
 
     if (editingTask) {
       const newTasks = tasks.map(t => t.id === editingTask.id ? { ...t, ...data, updatedAt: Date.now() } : t);
-      logAction(editingTask.id, data.title, "modified details", newTasks, updatedCats, logs);
+      addLog(editingTask.id, data.title, "modified settings", newTasks, freshCats, logs);
     } else {
       const newTask: Task = {
         id: Math.random().toString(36).substr(2, 9),
@@ -225,20 +247,10 @@ export default function App() {
         updatedAt: Date.now()
       };
       const newTasks = [...tasks, newTask];
-      logAction(newTask.id, newTask.title, "created a new entry", newTasks, updatedCats, logs);
+      addLog(newTask.id, newTask.title, "added new task", newTasks, freshCats, logs);
     }
     setIsModalOpen(false);
     setEditingTask(undefined);
-  };
-
-  const exportPlan = () => {
-    const headers = ["Category", "Task", "Status", "Deadline", "Assignee", "Notes"];
-    const rows = [headers.join(","), ...tasks.map(t => [`"${t.category}"`,`"${t.title}"`,`"${t.status}"`,`"${t.deadline || ''}"`,`"${t.assignee || ''}"`,`"${(t.notes || '').replace(/\n/g, ' ')}"`].join(","))];
-    const blob = new Blob(["\uFEFF" + rows.join("\n")], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `Event_Project_Tracking.csv`;
-    link.click();
   };
 
   if (isInitializing) return null;
@@ -263,30 +275,26 @@ export default function App() {
               
               <div className="flex items-center gap-3">
                 <button 
-                  onClick={() => pullLatest(true)}
-                  disabled={syncStatus === 'syncing'}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all active:scale-95 ${syncStatus === 'error' ? 'bg-red-50 border-red-200 text-red-600' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}
+                  onClick={() => pull(true)}
+                  disabled={syncStatus === 'syncing' || !isOnline}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all ${!isOnline ? 'bg-slate-100 text-slate-400' : syncStatus === 'error' ? 'bg-red-50 border-red-200 text-red-600' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}
                 >
-                  <svg className={`w-3.5 h-3.5 ${syncStatus === 'syncing' || syncStatus === 'checking' ? 'animate-spin text-indigo-600' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                  <svg className={`w-3.5 h-3.5 ${syncStatus === 'syncing' || syncStatus === 'checking' ? 'animate-spin text-indigo-500' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 4v5h5M20 20v-5h-5M4 13a8.1 8.1 0 0015.5 2m.5 5v-5h-5M20 11a8.1 8.1 0 00-15.5-2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
                   <span className="text-[10px] font-black uppercase tracking-widest">
-                    {syncStatus === 'error' ? 'TRY SYNC' : syncStatus === 'syncing' ? 'SAVING...' : syncStatus === 'checking' ? 'SYNCING...' : 'SYNCED'}
+                    {!isOnline ? 'OFFLINE' : syncStatus === 'error' ? 'RETRY' : syncStatus === 'syncing' ? 'SAVING...' : syncStatus === 'checking' ? 'SYNCING' : 'SYNCED'}
                   </span>
                 </button>
                 <div className="flex flex-col">
-                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter leading-none">Global Master Table</span>
-                  <span className="text-[10px] text-slate-500 font-mono leading-tight">{syncStatus === 'synced' ? `Updated: ${new Date(lastSyncTime).toLocaleTimeString([], { hour12: false })}` : 'Refreshing...'}</span>
+                  <span className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter leading-none">Shared Tracking</span>
+                  <span className="text-[10px] text-slate-500 font-mono leading-tight">{syncStatus === 'synced' ? `Refreshed: ${new Date(lastSyncTime).toLocaleTimeString([], { hour12: false })}` : 'Updating...'}</span>
                 </div>
               </div>
             </div>
 
             <div className="flex items-center gap-2 w-full sm:w-auto">
-              <button onClick={exportPlan} className="flex-1 sm:flex-none px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-sm font-bold hover:bg-slate-200 transition-all flex items-center justify-center gap-2">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                Export CSV
-              </button>
               <button onClick={() => { setEditingTask(undefined); setIsModalOpen(true); }} className="flex-1 sm:flex-none px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-100">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                NEW TASK
+                ADD NEW TASK
               </button>
             </div>
           </div>
@@ -304,11 +312,8 @@ export default function App() {
                   </div>
                   <div className="flex-grow overflow-y-auto custom-scrollbar space-y-4">
                     {tasks.filter(t => t.category === category).map(task => (
-                      <TaskCard key={task.id} task={task} onUpdate={(u) => updateTask(task.id, u)} onDelete={() => deleteTask(task.id)} onEdit={() => { setEditingTask(task); setIsModalOpen(true); }} />
+                      <TaskCard key={task.id} task={task} onUpdate={(u) => onUpdateTask(task.id, u)} onDelete={() => onDeleteTask(task.id)} onEdit={() => { setEditingTask(task); setIsModalOpen(true); }} />
                     ))}
-                    {tasks.filter(t => t.category === category).length === 0 && (
-                      <div className="h-full flex items-center justify-center text-slate-300 text-xs italic font-medium">No tasks found</div>
-                    )}
                   </div>
                 </div>
               ))}
@@ -316,8 +321,8 @@ export default function App() {
           ) : (
             <TaskListView 
               tasks={tasks} 
-              onUpdate={updateTask} 
-              onDelete={deleteTask} 
+              onUpdate={onUpdateTask} 
+              onDelete={onDeleteTask} 
               onEdit={(t) => { setEditingTask(t); setIsModalOpen(true); }} 
               categories={categories} 
               onAddTask={(c) => { setPreselectedCategory(c); setIsModalOpen(true); }} 
